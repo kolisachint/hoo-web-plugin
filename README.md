@@ -45,6 +45,19 @@ with `--ca-cert <PATH>`, or, as a last resort, skip verification with
 - [Product](docs/product.md) — what it does, features, usage, MCP, architecture
 - [Install & Development](docs/install.md) — install, library use, releasing
 
+## Related
+
+A small set of offline-first tools for agents:
+
+- **[hoocode](https://github.com/kolisachint/hoocode)** — deterministic terminal
+  coding agent (TypeScript, on npm)
+- **[embeddingsearchtools](https://github.com/kolisachint/embeddingsearchtools)** —
+  semantic + BM25 retrieval, HNSW from scratch (Rust)
+- **[voicetools](https://github.com/kolisachint/voicetools)** — offline speech
+  recognition, mic to stdout (Rust)
+
+Built by [Sachin Koli](https://kolisachint.github.io).
+
 ## License
 
 [MIT](LICENSE)
