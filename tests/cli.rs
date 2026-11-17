@@ -15,7 +15,8 @@ fn run(args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_webtools"));
     cmd.args(args)
         .env("HOME", &dir)
-        .env_remove("HOOCODE_CONFIG")
+        .env_remove("WEBTOOLS_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
         .env_remove("WEBTOOLS_SEARCH_PROVIDER")
         .env_remove("BRAVE_API_KEY")
         .env_remove("TAVILY_API_KEY")
@@ -559,11 +560,11 @@ fn an_unknown_provider_is_rejected() {
 #[test]
 fn fetch_defaults_come_from_the_config_file() {
     let dir = tempdir();
-    let config = dir.join("settings.json");
+    let config = dir.join("config.json");
     std::fs::write(
         &config,
         r#"{ "unrelatedTool": { "x": 1 },
-             "webtools": { "fetch": { "max_tokens": 40 } } }"#,
+             "fetch": { "max_tokens": 40 } }"#,
     )
     .expect("write config");
 
@@ -585,7 +586,7 @@ fn fetch_defaults_come_from_the_config_file() {
             "https://x.test/",
             "--json",
         ],
-        &[("HOOCODE_CONFIG", config.to_str().unwrap())],
+        &[("WEBTOOLS_CONFIG", config.to_str().unwrap())],
         None,
     );
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid json");
@@ -597,12 +598,8 @@ fn fetch_defaults_come_from_the_config_file() {
 #[test]
 fn a_flag_beats_the_config_file() {
     let dir = tempdir();
-    let config = dir.join("settings.json");
-    std::fs::write(
-        &config,
-        r#"{ "webtools": { "fetch": { "max_tokens": 40 } } }"#,
-    )
-    .expect("write config");
+    let config = dir.join("config.json");
+    std::fs::write(&config, r#"{ "fetch": { "max_tokens": 40 } }"#).expect("write config");
 
     let mut html = String::from("<html><head><title>T</title></head><body><article>");
     for i in 0..80 {
@@ -624,7 +621,7 @@ fn a_flag_beats_the_config_file() {
             "400",
             "--json",
         ],
-        &[("HOOCODE_CONFIG", config.to_str().unwrap())],
+        &[("WEBTOOLS_CONFIG", config.to_str().unwrap())],
         None,
     );
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid json");
@@ -636,7 +633,7 @@ fn a_flag_beats_the_config_file() {
 #[test]
 fn a_malformed_config_warns_and_the_command_still_runs() {
     let dir = tempdir();
-    let config = dir.join("settings.json");
+    let config = dir.join("config.json");
     std::fs::write(&config, "{ this is not json").expect("write config");
     let path = write_file("doc.html", DOC);
 
@@ -648,7 +645,7 @@ fn a_malformed_config_warns_and_the_command_still_runs() {
             "--url",
             "https://x.test/",
         ],
-        &[("HOOCODE_CONFIG", config.to_str().unwrap())],
+        &[("WEBTOOLS_CONFIG", config.to_str().unwrap())],
         None,
     );
     assert!(
@@ -672,11 +669,85 @@ fn a_missing_config_is_silent() {
             "--url",
             "https://x.test/",
         ],
-        &[("HOOCODE_CONFIG", "/no/such/settings.json")],
+        &[("WEBTOOLS_CONFIG", "/no/such/config.json")],
         None,
     );
     assert!(out.status.success());
-    assert!(!stderr(&out).contains("settings.json"), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("config.json"), "{}", stderr(&out));
+}
+
+/// An 80-paragraph article, long enough that a token budget visibly cuts it.
+fn long_article() -> std::path::PathBuf {
+    let mut html = String::from("<html><head><title>T</title></head><body><article>");
+    for i in 0..80 {
+        html.push_str(&format!(
+            "<p>Paragraph {i} with a good deal of filler text.</p>"
+        ));
+    }
+    html.push_str("</article></body></html>");
+    write_file("long.html", &html)
+}
+
+/// With no flag and no env override, the file is found under `XDG_CONFIG_HOME`.
+#[test]
+fn the_config_is_read_from_the_xdg_location() {
+    let xdg = tempdir();
+    let dir = xdg.join("webtools");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.json"),
+        r#"{ "fetch": { "max_tokens": 40 } }"#,
+    )
+    .expect("write config");
+    let path = long_article();
+
+    let out = run(
+        &[
+            "fetch",
+            "--from-file",
+            path.to_str().unwrap(),
+            "--url",
+            "https://x.test/",
+            "--json",
+        ],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid json");
+    let estimate = v["token_estimate"].as_u64().unwrap();
+    assert!(estimate <= 40, "XDG config ignored: {estimate}");
+}
+
+/// The old `~/.hoocode/settings.json` is not read, not even as a fallback.
+#[test]
+fn hoocode_settings_are_no_longer_read() {
+    let home = tempdir();
+    std::fs::create_dir_all(home.join(".hoocode")).expect("create old dir");
+    std::fs::write(
+        home.join(".hoocode").join("settings.json"),
+        r#"{ "webtools": { "fetch": { "max_tokens": 40 } } }"#,
+    )
+    .expect("write old config");
+    let path = long_article();
+
+    let out = run(
+        &[
+            "fetch",
+            "--from-file",
+            path.to_str().unwrap(),
+            "--url",
+            "https://x.test/",
+            "--json",
+        ],
+        &[("HOME", home.to_str().unwrap())],
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid json");
+    let estimate = v["token_estimate"].as_u64().unwrap();
+    assert!(
+        estimate > 40,
+        "the old hoocode settings were read: {estimate}"
+    );
 }
 
 // --- page cache -------------------------------------------------------------

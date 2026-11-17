@@ -314,7 +314,7 @@ webtools search --query "rust async runtime" --provider brave
 ```
 
 Keys are read from the environment or from
-[`~/.hoocode/settings.json`](#configuration), never from the command line —
+[`~/.config/webtools/config.json`](#configuration), never from the command line —
 a key in `argv` is visible to every process on the machine. They travel in
 request headers, never in a URL, so they cannot leak through error messages,
 proxy logs, or server access logs.
@@ -325,32 +325,30 @@ scraped one.
 
 ### Configuration
 
-`webtools` reads optional settings from `~/.hoocode/settings.json`
-(`$HOOCODE_CONFIG` overrides the path). There is no requirement to have one —
+`webtools` reads optional settings from `~/.config/webtools/config.json`
+(`$XDG_CONFIG_HOME/webtools/config.json` when `XDG_CONFIG_HOME` is set;
+`$WEBTOOLS_CONFIG` overrides the path). There is no requirement to have one —
 a missing file is not an error.
 
-The file is shared with other tooling, so `webtools` reads only its own
-`webtools` key and ignores everything else. Unknown keys inside that section are
-ignored too, so a newer config never breaks an older binary.
+The file holds `webtools` settings at its top level. Unknown keys are ignored,
+so a newer config never breaks an older binary.
 
 ```json
 {
-  "webtools": {
-    "search": {
-      "provider": "brave",
-      "fallback": "duckduckgo",
-      "providers": {
-        "brave":   { "api_key": "..." },
-        "tavily":  { "api_key": "..." },
-        "searxng": { "base_url": "https://searx.internal" }
-      }
-    },
-    "fetch": {
-      "timeout_secs": 20,
-      "max_tokens": 4000,
-      "cache_ttl_secs": 900,
-      "ca_certs": ["/etc/ssl/corp-root.pem"]
+  "search": {
+    "provider": "brave",
+    "fallback": "duckduckgo",
+    "providers": {
+      "brave":   { "api_key": "..." },
+      "tavily":  { "api_key": "..." },
+      "searxng": { "base_url": "https://searx.internal" }
     }
+  },
+  "fetch": {
+    "timeout_secs": 20,
+    "max_tokens": 4000,
+    "cache_ttl_secs": 900,
+    "ca_certs": ["/etc/ssl/corp-root.pem"]
   }
 }
 ```
@@ -372,7 +370,7 @@ often have no home directory to read.
 | SearXNG endpoint | `WEBTOOLS_SEARXNG_URL`, `WEBTOOLS_SEARXNG_API_KEY` |
 
 The file holds credentials, so `webtools` warns when it is readable by other
-users — `chmod 600 ~/.hoocode/settings.json`. Keys are never printed: the
+users — `chmod 600 ~/.config/webtools/config.json`. Keys are never printed: the
 `Debug` implementations of every type that holds one redact it.
 
 The libraries do not read this file. `webtools-fetch` and `webtools-search` are
@@ -553,7 +551,7 @@ tool, and a thin root binary that wires them into subcommands.
 Cargo.toml              Workspace + the webtools binary package
 src/
 ├── main.rs             Unified CLI: fetch / search / mcp subcommands
-├── config.rs           ~/.hoocode/settings.json loader (binary only)
+├── config.rs           ~/.config/webtools/config.json loader (binary only)
 └── mcp.rs              MCP stdio server (JSON-RPC over stdin/stdout)
 crates/
 ├── core/               webfetch-core: primitives shared by both tools

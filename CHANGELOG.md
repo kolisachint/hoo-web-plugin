@@ -118,6 +118,14 @@ lockstep semantic versioning across all crates.
 
 ### Breaking
 
+- **Config file moved to `~/.config/webtools/config.json`.** `webtools` no
+  longer reads `~/.hoocode/settings.json` and has no fallback to it. The file
+  now holds the settings at its top level, so the old `webtools` wrapper object
+  is dropped: `webtools.search` becomes `search`, `webtools.fetch` becomes
+  `fetch`. The default directory is `$XDG_CONFIG_HOME/webtools` when that is
+  set. `HOOCODE_CONFIG` is removed; `WEBTOOLS_CONFIG` replaces it as the path
+  override. All environment variables and flags are unchanged.
+
 - `webfetch::types::FetchOptions` gains `grep`, and `FetchResult` gains a
   `matches` vector of `webfetch::grep::Match`. Exhaustive struct literals need
   them; `..Default::default()` is unaffected.

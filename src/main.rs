@@ -94,7 +94,7 @@ enum Commands {
         #[arg(long)]
         safe_search: Option<String>,
         /// Search backend: duckduckgo (default, no key) | brave | tavily |
-        /// searxng. Keys come from the environment or ~/.hoocode/settings.json.
+        /// searxng. Keys come from the environment or ~/.config/webtools/config.json.
         #[arg(long)]
         provider: Option<String>,
         /// Request timeout in seconds.
@@ -154,7 +154,7 @@ fn parse_safe_search(value: Option<&str>) -> Option<bool> {
     }
 }
 
-/// Merge `--ca-cert` with the paths configured in `settings.json`.
+/// Merge `--ca-cert` with the paths configured in `config.json`.
 fn tls_config(flag_certs: Vec<PathBuf>, insecure: bool, configured: &[PathBuf]) -> TlsConfig {
     let mut ca_certs = configured.to_vec();
     ca_certs.extend(flag_certs);
@@ -224,7 +224,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             ca_cert,
             insecure,
         } => {
-            let fetch_config = &settings.webtools.fetch;
+            let fetch_config = &settings.fetch;
             let base = url.clone().unwrap_or_default();
             let options = FetchOptions {
                 url: base.clone(),
@@ -300,7 +300,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             ca_cert,
             insecure,
         } => {
-            let search_config = &settings.webtools.search;
+            let search_config = &settings.search;
             let primary = search_config.resolve_primary(provider.as_deref())?;
             let fallback = search_config.resolve_fallback(&primary);
 
@@ -309,7 +309,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 max_results: Some(max_results),
                 safe_search: parse_safe_search(safe_search.as_deref()),
                 timeout_secs: timeout,
-                tls: tls_config(ca_cert, insecure, &settings.webtools.fetch.ca_certs),
+                tls: tls_config(ca_cert, insecure, &settings.fetch.ca_certs),
                 provider: primary,
                 fallback,
             };
