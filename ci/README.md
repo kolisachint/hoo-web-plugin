@@ -26,6 +26,10 @@ Runs on pushes to `main` and on PRs:
   time.
 - **msrv** — builds the workspace on the `rust-version` declared in
   `Cargo.toml`. The libraries are published, so downstream users hold us to it.
+- **wasm** — `rustup target add wasm32-wasip2`, then builds and clippy-lints
+  `webtools-core`, `webtools-fetch` and `webtools-search` with
+  `--no-default-features --features wasi`. Build and lint only, no tests. This
+  keeps the WASI transport from pulling tokio, reqwest or rustls back in.
 
 `--locked` everywhere: a run that quietly resolves different dependencies than
 `Cargo.lock` pins is not testing what ships.

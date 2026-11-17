@@ -13,6 +13,21 @@ lockstep semantic versioning across all crates.
 
 ### Added
 
+- **Builds for `wasm32-wasip2` (WASI 0.2 `wasi:http`).** `webtools-core`,
+  `webtools-fetch` and `webtools-search` take a `wasi` feature. It adds
+  `WasiTransport`, which sends each request through `wasi:http/outgoing-handler`
+  as one hop without following redirects. Build with
+  `--no-default-features --features wasi`; the tree then has no tokio, reqwest
+  or rustls. The host enforces SSRF rules, DNS policy and TLS, since this path
+  has no guard and no TLS configuration of its own.
+- **Retry backoff waits through the transport.** `Transport::sleep` is the
+  wait between retries, so a host without a tokio runtime can drive the same
+  retry loop. Tokio is an optional dependency behind `native` in each library
+  crate.
+- **CI `wasm` job.** Builds and clippy-lints the three libraries for
+  `wasm32-wasip2 --no-default-features --features wasi`. Delivered as
+  `ci/workflow-updates.patch` until that patch is applied.
+
 - **`fetch --grep <pattern>` finds where a page mentions something.** Paging
   reads a document in order and `--outline` maps it by heading, but neither
   answers "where does this mention rate limiting" on a page whose headings do
@@ -117,6 +132,10 @@ lockstep semantic versioning across all crates.
   the offline path mangled pages the network path handled correctly.
 
 ### Breaking
+
+- **`Transport` has a new required method, `sleep`.** Custom implementations
+  must add it (`ReqwestTransport` and `WasiTransport` already do). Test fakes
+  can make it a no-op.
 
 - **Config file moved to `~/.config/webtools/config.json`.** `webtools` no
   longer reads `~/.hoocode/settings.json` and has no fallback to it. The file

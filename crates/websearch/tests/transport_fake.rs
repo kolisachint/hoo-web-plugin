@@ -35,6 +35,10 @@ impl Transport for Fake {
             .pop_front()
             .expect("search sent more requests than the test scripted")
     }
+
+    /// Retries do not wait in tests: the fake answers the next scripted reply
+    /// at once.
+    async fn sleep(&self, _d: std::time::Duration) {}
 }
 
 fn json_ok(body: &str) -> Result<HttpResponse, TransportError> {

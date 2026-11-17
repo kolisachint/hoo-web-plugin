@@ -2,13 +2,17 @@
 //!
 //! Everything above this module builds an [`HttpRequest`], hands it to a
 //! [`Transport`], and reads an [`HttpResponse`] back. The native implementation
-//! is [`ReqwestTransport`] (behind the `native` feature). A host that cannot use
-//! reqwest, such as a WASI component on `wasi:http`, implements [`Transport`]
-//! itself and calls the same generic entry points.
+//! is [`ReqwestTransport`] (behind the `native` feature). The WASI 0.2
+//! implementation is [`WasiTransport`] (behind the `wasi` feature), which sends
+//! through `wasi:http/outgoing-handler`. A host with its own HTTP stack
+//! implements [`Transport`] itself and calls the same generic entry points.
 //!
 //! One `send` is one hop: a transport never follows redirects. The 3xx response
 //! is returned as-is so the caller can re-validate the target before issuing the
 //! next request. Bodies are capped at [`crate::http::MAX_BODY_BYTES`].
+//!
+//! The transport owns the wait between retries too ([`Transport::sleep`]), so a
+//! host without a tokio runtime can drive the same retry loop.
 
 use std::fmt;
 use std::future::Future;
@@ -18,6 +22,8 @@ use std::time::Duration;
 use crate::http::{push_capped, MAX_BODY_BYTES, USER_AGENT};
 #[cfg(feature = "native")]
 use crate::tls::TlsConfig;
+#[cfg(feature = "wasi")]
+pub use crate::wasi_transport::WasiTransport;
 
 /// HTTP method. The libraries only ever need these two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +73,7 @@ pub enum TransportError {
     /// The TLS handshake or certificate check failed.
     Tls(String),
     /// The body exceeded the cap and the transport refuses to truncate it.
-    /// `ReqwestTransport` truncates instead and never returns this.
+    /// The shipped transports truncate instead and never return this.
     BodyTooLarge,
     /// Anything else, with the transport's own description.
     Other(String),
@@ -102,6 +108,11 @@ pub trait Transport: Send + Sync {
         &self,
         req: HttpRequest,
     ) -> impl Future<Output = Result<HttpResponse, TransportError>> + Send;
+
+    /// Wait for `d`. Every retry backoff goes through here, so the host's clock
+    /// decides how the wait happens (tokio timer natively, a WASI pollable on
+    /// `wasip2`, or an instant no-op in tests).
+    fn sleep(&self, d: Duration) -> impl Future<Output = ()> + Send;
 }
 
 /// Lets a borrowed transport be used wherever an owned one is expected.
@@ -111,6 +122,10 @@ impl<T: Transport + ?Sized> Transport for &T {
         req: HttpRequest,
     ) -> impl Future<Output = Result<HttpResponse, TransportError>> + Send {
         (**self).send(req)
+    }
+
+    fn sleep(&self, d: Duration) -> impl Future<Output = ()> + Send {
+        (**self).sleep(d)
     }
 }
 
@@ -230,6 +245,10 @@ impl Transport for ReqwestTransport {
             headers,
             body,
         })
+    }
+
+    async fn sleep(&self, d: Duration) {
+        tokio::time::sleep(d).await;
     }
 }
 

@@ -91,7 +91,7 @@ pub async fn fetch_lite_with(
                 if attempt_no == MAX_ATTEMPTS || !transient {
                     return Err(err);
                 }
-                tokio::time::sleep(delay).await;
+                transport.sleep(delay).await;
                 delay *= 2;
             }
         }

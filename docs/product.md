@@ -560,6 +560,8 @@ crates/
 │       ├── compress.rs   Whitespace/decorative reduction + token estimation
 │       ├── refs.rs       Referable trait, reference block, budget fitting
 │       ├── http.rs       Shared user agent, body cap, retry classification
+│       ├── transport.rs  Transport trait (send + sleep), ReqwestTransport (native)
+│       ├── wasi_transport.rs  WasiTransport over wasi:http (wasi feature)
 │       └── tls.rs        Trust anchors: OS store, SSL_CERT_FILE, --ca-cert
 ├── webfetch/           webfetch: fetch + convert library
 │   └── src/
@@ -582,6 +584,29 @@ crates/
 Each leaf crate re-exports `webfetch_core::{compress, refs, http, tls}`, so the
 shared reference-style logic has a single home but stays reachable as
 `webfetch::refs` / `websearch::refs`.
+
+### Transports and features
+
+Every request goes through a `Transport` (in `webfetch_core::transport`):
+`send` performs one hop without following redirects, and `sleep` is the wait
+between retries. The leaf crates build on it with two features, which both
+crates and the core share:
+
+- `native` (default): `ReqwestTransport` over reqwest and rustls, the OS trust
+  store, the SSRF guard with DNS pinning, and tokio for the retry timer.
+  `fetch_page`, `fetch_and_convert`, `run_search` and `Provider::search` use it.
+- `wasi`: `WasiTransport`, which sends through `wasi:http/outgoing-handler` from
+  a `wasm32-wasip2` component. It pulls in no tokio, reqwest or rustls.
+
+The two may both be on, and the native entry points keep working.
+The generic entry points take any transport: `webfetch::fetch_with(&transport,
+url, timeout_secs)` and `websearch::run_search_with` / `Provider::search_with` /
+`websearch::providers::{ddg,brave,tavily,searxng}::search_with`.
+
+A `wasi` build has no SSRF guard, no DNS pinning and no TLS configuration. The
+host the component runs in must enforce those: deny private and loopback
+targets, pin or validate resolution, and terminate TLS. A host refusal reaches
+the library as `TransportError::Other("denied by host: ...")`.
 
 Configuration deliberately lives only in `src/`. The library crates take
 fully-populated option structs and never read the environment or the filesystem

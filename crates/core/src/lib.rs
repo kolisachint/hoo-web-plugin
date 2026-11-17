@@ -4,9 +4,9 @@
 //! body cap, retry classification ([`http`]) — and the [`transport`]
 //! abstraction the libraries send requests through. The native
 //! [`transport::ReqwestTransport`] and shared TLS trust configuration ([`tls`])
-//! are behind the `native` feature. Both leaf crates re-export these so their
-//! internal modules can keep using `crate::compress` / `crate::refs` /
-//! `crate::tls`.
+//! are behind the `native` feature; the WASI 0.2 [`transport::WasiTransport`]
+//! is behind `wasi`. Both leaf crates re-export these so their internal modules
+//! can keep using `crate::compress` / `crate::refs` / `crate::tls`.
 
 pub mod charset;
 pub mod compress;
@@ -16,3 +16,6 @@ pub mod transport;
 
 #[cfg(feature = "native")]
 pub mod tls;
+
+#[cfg(feature = "wasi")]
+mod wasi_transport;

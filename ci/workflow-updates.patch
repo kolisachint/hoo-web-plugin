@@ -1,8 +1,8 @@
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index 1b42220..14b80a9 100644
+index 1b42220..054fd3f 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
-@@ -20,6 +20,40 @@ jobs:
+@@ -20,6 +20,57 @@ jobs:
        - name: Format
          run: cargo fmt --all --check
        - name: Clippy
@@ -45,6 +45,23 @@ index 1b42220..14b80a9 100644
 +          toolchain: ${{ steps.msrv.outputs.version }}
 +      - uses: Swatinem/rust-cache@v2
 +      - run: cargo check --workspace --locked
++
++  # The libraries build for wasm32-wasip2 with the `wasi` feature (WASI 0.2
++  # `wasi:http`, no native HTTP stack). Build and lint only: a component host
++  # runs them, so there is no test run here.
++  wasm:
++    name: wasm32-wasip2 (wasi feature)
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: dtolnay/rust-toolchain@stable
++      - name: Add the wasm target
++        run: rustup target add wasm32-wasip2
++      - uses: Swatinem/rust-cache@v2
++      - name: Build
++        run: cargo build -p webtools-core -p webtools-fetch -p webtools-search --target wasm32-wasip2 --no-default-features --features wasi --locked
++      - name: Clippy
++        run: cargo clippy -p webtools-core -p webtools-fetch -p webtools-search --target wasm32-wasip2 --no-default-features --features wasi --locked -- -D warnings
 diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
 index 7529b57..fd8cc12 100644
 --- a/.github/workflows/release.yml

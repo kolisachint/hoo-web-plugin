@@ -195,7 +195,7 @@ async fn fetch_with_retries<T: Transport>(
                 if Instant::now() + delay >= deadline {
                     return Err(err);
                 }
-                tokio::time::sleep(delay).await;
+                transport.sleep(delay).await;
                 delay *= 2;
             }
         }

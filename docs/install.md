@@ -119,6 +119,44 @@ for hit in &output.results {
 }
 ```
 
+### Native or WASI (`wasm32-wasip2`)
+
+Both libraries default to the `native` feature (reqwest, rustls, the SSRF guard,
+tokio). For a WebAssembly component on `wasi:http`, turn the default off and
+enable `wasi`:
+
+```toml
+[dependencies]
+webfetch = { package = "webtools-fetch", version = "0.2", default-features = false, features = ["wasi"] }
+websearch = { package = "webtools-search", version = "0.2", default-features = false, features = ["wasi"] }
+```
+
+The `wasi` build has no network policy of its own. Name the transport through
+the core crate, enabling its `wasi` feature too, then call the generic entry
+points, which take the transport as an argument:
+
+```toml
+[dependencies]
+webfetch-core = { package = "webtools-core", version = "0.2", default-features = false, features = ["wasi"] }
+```
+
+```rust
+use webfetch_core::transport::WasiTransport;
+
+let transport = WasiTransport::new();
+let page = webfetch::fetch_with(&transport, "https://docs.example.com/api", 10).await?;
+let output = websearch::run_search_with(&transport, search_opts).await?;
+```
+
+`fetch_with` runs the same redirect, retry and deadline logic as the native
+path, without the SSRF guard. `run_search_with` and `Provider::search_with` do
+the same for search.
+
+With `wasi` the caller's host must enforce SSRF rules (private, loopback and
+link-local targets), DNS policy and TLS. The libraries send the request and
+trust the host's answer. The host's refusals come back as `TransportError::Other`
+with a `denied by host` message.
+
 ## Development
 
 ```bash
