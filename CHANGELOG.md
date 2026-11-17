@@ -13,6 +13,13 @@ lockstep semantic versioning across all crates.
 
 ### Added
 
+- **hoocode plugin `webtools`** (`plugin/`). An Agent Plugins 1.0 package with
+  the skill `web` and the WASI component `dev.hoocode/extension.wasm`. The
+  component is `plugin/component`, a guest crate outside the workspace. It
+  exposes `fetch` and `search` (the MCP tools' arguments and defaults) through
+  the `hoocode:extension@0.1.0` contract. Search providers and keys come from
+  the host's `config-get`. `plugin/build.sh` rebuilds the component; the build
+  is reproducible on one checkout and across target directories.
 - **Builds for `wasm32-wasip2` (WASI 0.2 `wasi:http`).** `webtools-core`,
   `webtools-fetch` and `webtools-search` take a `wasi` feature. It adds
   `WasiTransport`, which sends each request through `wasi:http/outgoing-handler`

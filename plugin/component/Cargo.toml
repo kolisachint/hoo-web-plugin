@@ -1,0 +1,30 @@
+[package]
+name = "webtools-extension"
+version = "0.6.0"
+edition = "2021"
+license = "MIT"
+description = "hoocode extension component: webtools fetch and search over wasi:http"
+publish = false
+
+# Not a member of the webtools workspace (excluded in the root Cargo.toml). It has
+# its own Cargo.lock and is built for wasm32-wasip2 by plugin/build.sh.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Path deps on the webtools libraries, without their native (reqwest/tokio) side.
+# The `wasi` feature routes HTTP through wasi:http, which hoocode's host gates.
+webfetch = { package = "webtools-fetch", path = "../../crates/webfetch", default-features = false, features = ["wasi"] }
+websearch = { package = "webtools-search", path = "../../crates/websearch", default-features = false, features = ["wasi"] }
+webfetch-core = { package = "webtools-core", path = "../../crates/core", default-features = false, features = ["wasi"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen = "0.63.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

@@ -410,6 +410,17 @@ The server takes no command-line flags, so extra CA certificates and a keyed
 search provider both come from [the config file](#configuration) or the
 environment.
 
+## As a hoocode plugin
+
+`plugin/` is an Agent Plugins 1.0 package for [hoocode](https://github.com/kolisachint/hoocode).
+The same libraries run inside hoocode as a WASI 0.2 component
+(`plugin/dev.hoocode/extension.wasm`), with no `webtools` binary on the path. The
+tools are `ext_webtools_fetch` and `ext_webtools_search`, with the MCP argument
+names and defaults. Requests go through hoocode's permission gate and its SSRF
+block, and search keys come from hoocode's settings (`searchProvider`,
+`braveApiKey`, `tavilyApiKey`, `searxngUrl`). The component's build, tools and
+settings are in [`plugin/README.md`](../plugin/README.md).
+
 ## Security (SSRF guard)
 
 `fetch` is reachable from the CLI and the MCP server, so a crafted or

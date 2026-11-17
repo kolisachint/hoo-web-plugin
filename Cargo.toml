@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/core", "crates/webfetch", "crates/websearch"]
+# The hoocode extension component builds for wasm32-wasip2 on its own (own lockfile).
+exclude = ["plugin/component"]
 resolver = "2"
 
 [workspace.dependencies]

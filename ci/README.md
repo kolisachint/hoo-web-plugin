@@ -30,6 +30,11 @@ Runs on pushes to `main` and on PRs:
   `webtools-core`, `webtools-fetch` and `webtools-search` with
   `--no-default-features --features wasi`. Build and lint only, no tests. This
   keeps the WASI transport from pulling tokio, reqwest or rustls back in.
+- **plugin** — runs `plugin/build.sh` to build the hoocode plugin's WASI
+  component and uploads it as an artifact. It does not compare the result with
+  the committed `plugin/dev.hoocode/extension.wasm`: the build is not
+  reproducible across checkout paths, so a byte comparison would fail on every
+  run. Rebuild and commit the artifact by hand when the component changes.
 
 `--locked` everywhere: a run that quietly resolves different dependencies than
 `Cargo.lock` pins is not testing what ships.

@@ -44,6 +44,8 @@ with `--ca-cert <PATH>`, or, as a last resort, skip verification with
 
 - [Product](docs/product.md) — what it does, features, usage, MCP, architecture
 - [Install & Development](docs/install.md) — install, library use, releasing
+- [hoocode plugin](plugin/README.md) — the same `fetch` and `search` as an
+  Agent Plugins 1.0 package for hoocode, built as a WASI component
 
 ## Related
 
