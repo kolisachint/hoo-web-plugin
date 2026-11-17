@@ -1,15 +1,18 @@
-use reqwest::header::{CONTENT_TYPE, LOCATION};
-use reqwest::{redirect::Policy, Client};
-use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::future::Future;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+use url::Url;
+
+#[cfg(feature = "native")]
 use crate::guard;
+#[cfg(feature = "native")]
 use crate::tls::TlsConfig;
 use webfetch_core::charset;
-use webfetch_core::http::{
-    read_body_capped_bytes, transient_send_error, transient_status, USER_AGENT,
-};
+use webfetch_core::http::transient_status;
+#[cfg(feature = "native")]
+use webfetch_core::transport::ReqwestTransport;
+use webfetch_core::transport::{HttpRequest, Method, Transport};
 
 const MAX_ATTEMPTS: u32 = 3;
 const MAX_REDIRECTS: usize = 5;
@@ -46,69 +49,100 @@ enum Hop {
     Redirect(String),
 }
 
-/// Build a client for a single validated URL. `pinned` are the public IPs the
-/// host already resolved to; binding them closes the DNS-rebinding window
-/// between validation and connection.
+/// Chooses the transport for one hop.
 ///
-/// Redirects are **not** followed by reqwest here ([`Policy::none`]): we follow
-/// them manually in [`fetch_page`] so every hop is re-validated *and* pinned to
-/// its own resolved addresses. (Reqwest's `resolve_to_addrs` pins only the
-/// hosts known at build time, so auto-follow would leave redirect hops
-/// unpinned.) A consequence is that connection pooling cannot be shared across
-/// hosts via one long-lived client without weakening per-URL IP pinning, so we
-/// deliberately do not cache clients — SSRF safety wins over pool reuse.
+/// This is where a host-level policy attaches. The native [`fetch_page`] runs
+/// the SSRF guard here and pins each hop's transport to the addresses it
+/// resolved to. [`fetch_with`] uses the caller's transport unchanged, so a host
+/// that enforces its own policy (or has none to enforce) skips the guard.
+trait HopTransport: Send + Sync {
+    type Transport: Transport;
+    fn transport_for(
+        &self,
+        url: &Url,
+    ) -> impl Future<Output = anyhow::Result<Self::Transport>> + Send;
+}
+
+/// The caller's transport, used for every hop as-is.
+struct Fixed<'a, T>(&'a T);
+
+impl<'a, T: Transport> HopTransport for Fixed<'a, T> {
+    type Transport = &'a T;
+    fn transport_for(
+        &self,
+        _url: &Url,
+    ) -> impl Future<Output = anyhow::Result<Self::Transport>> + Send {
+        let transport = self.0;
+        async move { Ok(transport) }
+    }
+}
+
+/// Native policy: validate the hop's host with the SSRF guard, then build a
+/// transport pinned to the addresses that validation resolved.
 ///
-/// Note that IP pinning only takes effect on a direct connection: when
-/// `HTTP(S)_PROXY` is set, the proxy resolves the host itself and the pinned
-/// addresses are never used. See `docs/product.md`.
-fn build_client(
-    url: &reqwest::Url,
-    timeout: Duration,
-    pinned: &[SocketAddr],
-    tls: &TlsConfig,
-) -> anyhow::Result<Client> {
-    let mut builder = Client::builder()
-        .timeout(timeout)
-        .redirect(Policy::none())
-        .user_agent(USER_AGENT)
-        .gzip(true)
-        .brotli(true);
+/// Pinning closes the DNS-rebinding window between validation and connection.
+/// It takes effect only on a direct connection: when `HTTP(S)_PROXY` is set, the
+/// proxy resolves the host itself and the pinned addresses are never used. See
+/// `docs/product.md`.
+#[cfg(feature = "native")]
+struct Guarded<'a> {
+    tls: &'a TlsConfig,
+}
 
-    // Trust the OS store (+ SSL_CERT_FILE / --ca-cert) so org/proxy root CAs
-    // are accepted, instead of only the bundled webpki roots.
-    builder = tls.apply(builder)?;
-
-    if let Some(host) = url.host_str() {
-        if !pinned.is_empty() {
-            builder = builder.resolve_to_addrs(host, pinned);
+#[cfg(feature = "native")]
+impl HopTransport for Guarded<'_> {
+    type Transport = ReqwestTransport;
+    fn transport_for(
+        &self,
+        url: &Url,
+    ) -> impl Future<Output = anyhow::Result<Self::Transport>> + Send {
+        let tls = self.tls;
+        async move {
+            let pinned = guard::validate_url(url).await?;
+            let host = url.host_str().unwrap_or("");
+            Ok(ReqwestTransport::pinned(tls, host, &pinned)?)
         }
     }
-    Ok(builder.build()?)
+}
+
+/// The request for one page hop.
+fn page_request(url: &Url, timeout: Duration) -> HttpRequest {
+    HttpRequest {
+        method: Method::Get,
+        url: url.to_string(),
+        headers: vec![
+            (
+                "Accept".to_string(),
+                "text/html,application/xhtml+xml,*/*;q=0.8".to_string(),
+            ),
+            ("Accept-Language".to_string(), "en-US,en;q=0.9".to_string()),
+        ],
+        body: None,
+        timeout: Some(timeout),
+    }
 }
 
 /// One request attempt. The bool in the error reports whether the failure is
 /// transient (worth retrying): connection/timeout errors, 5xx, and 429.
-async fn attempt(client: &Client, url: &str) -> Result<Hop, (anyhow::Error, bool)> {
-    let resp = match client
-        .get(url)
-        .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
-        .await
-    {
+async fn attempt<T: Transport>(
+    transport: &T,
+    request: HttpRequest,
+) -> Result<Hop, (anyhow::Error, bool)> {
+    let url = request.url.clone();
+    let resp = match transport.send(request).await {
         Ok(r) => r,
         Err(e) => {
-            let transient = transient_send_error(&e);
+            let transient = e.is_transient();
             return Err((e.into(), transient));
         }
     };
 
-    let status = resp.status();
+    let status = resp.status;
 
     // Redirects are surfaced to the caller (which re-validates and pins the
-    // target) rather than followed by reqwest.
-    if status.is_redirection() {
-        return match resp.headers().get(LOCATION).and_then(|v| v.to_str().ok()) {
+    // target): the transport never follows them.
+    if (300..400).contains(&status) {
+        return match resp.header("location") {
             Some(loc) => Ok(Hop::Redirect(loc.to_string())),
             None => Err((
                 anyhow::anyhow!("redirect ({status}) without a Location header"),
@@ -117,34 +151,27 @@ async fn attempt(client: &Client, url: &str) -> Result<Hop, (anyhow::Error, bool
         };
     }
 
-    let resp = match resp.error_for_status() {
-        Ok(r) => r,
-        Err(e) => {
-            let transient = transient_status(status);
-            return Err((e.into(), transient));
-        }
-    };
+    if !(200..300).contains(&status) {
+        return Err((
+            anyhow::anyhow!("HTTP status {status} for url ({url})"),
+            transient_status(status),
+        ));
+    }
 
-    let final_url = resp.url().to_string();
-    let content_type = resp
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let content_type = resp.header("content-type").map(str::to_string);
 
     // Decode with the response's declared charset rather than assuming UTF-8:
     // a windows-1252 / ISO-8859-1 page is otherwise returned full of
     // replacement characters.
-    let raw = read_body_capped_bytes(resp).await?;
     let declared = content_type
         .as_deref()
         .and_then(charset::from_content_type)
-        .or_else(|| charset::sniff_meta(&raw));
-    let (body, undecodable_charset) = charset::decode(&raw, declared.as_deref());
+        .or_else(|| charset::sniff_meta(&resp.body));
+    let (body, undecodable_charset) = charset::decode(&resp.body, declared.as_deref());
 
     Ok(Hop::Page(FetchedPage {
         body,
-        final_url,
+        final_url: url,
         content_type,
         undecodable_charset,
     }))
@@ -152,10 +179,14 @@ async fn attempt(client: &Client, url: &str) -> Result<Hop, (anyhow::Error, bool
 
 /// Issue one hop's request, retrying transient failures with exponential
 /// backoff (200ms, 400ms) while the overall deadline allows.
-async fn fetch_with_retries(client: &Client, url: &str, deadline: Instant) -> anyhow::Result<Hop> {
+async fn fetch_with_retries<T: Transport>(
+    transport: &T,
+    request: &HttpRequest,
+    deadline: Instant,
+) -> anyhow::Result<Hop> {
     let mut delay = Duration::from_millis(200);
     for attempt_no in 1..=MAX_ATTEMPTS {
-        match attempt(client, url).await {
+        match attempt(transport, request.clone()).await {
             Ok(hop) => return Ok(hop),
             Err((err, transient)) => {
                 if attempt_no == MAX_ATTEMPTS || !transient {
@@ -172,22 +203,20 @@ async fn fetch_with_retries(client: &Client, url: &str, deadline: Instant) -> an
     unreachable!("loop returns on the final attempt")
 }
 
-/// Fetch a URL, following redirects manually so the SSRF guard re-validates and
-/// re-pins each hop (closing the DNS-rebinding window for redirected hosts too),
-/// retrying transient failures with exponential backoff. Caps the redirect
-/// chain at [`MAX_REDIRECTS`], the body at
-/// [`webfetch_core::http::MAX_BODY_BYTES`], and the whole operation at
+/// The redirect loop shared by both entry points. Each hop asks `hops` for its
+/// transport, sends one request, and either returns the page or follows the
+/// redirect. Capped at [`MAX_REDIRECTS`], and the whole operation at
 /// [`TOTAL_BUDGET_MULTIPLIER`] times `timeout_secs`.
-pub async fn fetch_page(
+async fn fetch_hops<H: HopTransport>(
+    hops: &H,
     url: &str,
     timeout_secs: u64,
-    tls: &TlsConfig,
 ) -> anyhow::Result<FetchedPage> {
     let per_request = Duration::from_secs(timeout_secs);
     let deadline = Instant::now() + per_request * TOTAL_BUDGET_MULTIPLIER;
 
-    let mut current = reqwest::Url::parse(url)?;
-    let mut hops = 0usize;
+    let mut current = Url::parse(url)?;
+    let mut redirects = 0usize;
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -198,16 +227,14 @@ pub async fn fetch_page(
             );
         }
 
-        // Validate + resolve the host for THIS hop, then pin the connection to
-        // exactly those addresses.
-        let pinned = guard::validate_url(&current).await?;
-        let client = build_client(&current, per_request.min(remaining), &pinned, tls)?;
+        let transport = hops.transport_for(&current).await?;
+        let request = page_request(&current, per_request.min(remaining));
 
-        match fetch_with_retries(&client, current.as_str(), deadline).await? {
+        match fetch_with_retries(&transport, &request, deadline).await? {
             Hop::Page(page) => return Ok(page),
             Hop::Redirect(location) => {
-                hops += 1;
-                if hops > MAX_REDIRECTS {
+                redirects += 1;
+                if redirects > MAX_REDIRECTS {
                     anyhow::bail!("too many redirects (>{MAX_REDIRECTS})");
                 }
                 current = current
@@ -216,4 +243,29 @@ pub async fn fetch_page(
             }
         }
     }
+}
+
+/// Fetch a URL over the native transport, following redirects manually so the
+/// SSRF guard re-validates and re-pins each hop (closing the DNS-rebinding
+/// window for redirected hosts too), retrying transient failures with
+/// exponential backoff.
+#[cfg(feature = "native")]
+pub async fn fetch_page(
+    url: &str,
+    timeout_secs: u64,
+    tls: &TlsConfig,
+) -> anyhow::Result<FetchedPage> {
+    fetch_hops(&Guarded { tls }, url, timeout_secs).await
+}
+
+/// Fetch a URL through a caller-supplied transport.
+///
+/// Same redirect, retry and budget behaviour as [`fetch_page`], without the
+/// SSRF guard: the transport is trusted to decide what it may reach.
+pub async fn fetch_with(
+    transport: &impl Transport,
+    url: &str,
+    timeout_secs: u64,
+) -> anyhow::Result<FetchedPage> {
+    fetch_hops(&Fixed(transport), url, timeout_secs).await
 }

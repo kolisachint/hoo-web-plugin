@@ -14,14 +14,19 @@ categories = ["web-programming", "text-processing"]
 [lib]
 name = "websearch"
 
+[features]
+default = ["native"]
+# Native HTTP (`ReqwestTransport`) and the OS trust store. Without it, callers
+# use the `*_with` entry points and supply their own `Transport`.
+native = ["webfetch-core/native"]
+
 [dependencies]
 webfetch-core = { workspace = true }
 tokio = { workspace = true }
-reqwest = { workspace = true }
-scraper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
 anyhow = { workspace = true }
 urlencoding = { workspace = true }
 once_cell = { workspace = true }
+scraper = { workspace = true }

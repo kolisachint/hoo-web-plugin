@@ -2,8 +2,9 @@
 //! response-body cap, and the retry classification. Both paths previously
 //! carried their own copy of the last two and had drifted apart — search read
 //! bodies without any cap at all.
-
-use reqwest::{Response, StatusCode};
+//!
+//! Nothing here touches a concrete HTTP client; the transport-level pieces live
+//! in [`crate::transport`].
 
 /// The user agent both paths send.
 ///
@@ -25,7 +26,8 @@ pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
 /// Append as much of `chunk` to `buf` as fits under `max`. Returns `true` once
 /// the cap is reached (the body is truncated and the caller should stop).
-fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
+pub(crate) fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
     let remaining = max.saturating_sub(buf.len());
     if chunk.len() >= remaining {
         buf.extend_from_slice(&chunk[..remaining]);
@@ -36,50 +38,9 @@ fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
     }
 }
 
-/// Read a response body, streaming chunks with a running byte cap so an
-/// oversized body is bounded before it is ever parsed. The `bool` in the error
-/// reports whether the read failure is transient (worth retrying).
-///
-/// Decodes as UTF-8. Use [`read_body_capped_bytes`] when the response's declared
-/// charset matters.
-pub async fn read_body_capped(resp: Response) -> Result<String, (anyhow::Error, bool)> {
-    let bytes = read_body_capped_bytes(resp).await?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-/// [`read_body_capped`] without the decoding step, for callers that need to
-/// apply the response's declared charset themselves.
-pub async fn read_body_capped_bytes(mut resp: Response) -> Result<Vec<u8>, (anyhow::Error, bool)> {
-    let mut buf: Vec<u8> = Vec::new();
-    // Honour Content-Length to pre-size, but never trust it past the cap.
-    if let Some(len) = resp.content_length() {
-        buf.reserve(len.min(MAX_BODY_BYTES as u64) as usize);
-    }
-    loop {
-        match resp.chunk().await {
-            Ok(Some(chunk)) => {
-                if push_capped(&mut buf, &chunk, MAX_BODY_BYTES) {
-                    break;
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                let transient = e.is_timeout();
-                return Err((e.into(), transient));
-            }
-        }
-    }
-    Ok(buf)
-}
-
-/// Is a send/connect failure worth retrying?
-pub fn transient_send_error(e: &reqwest::Error) -> bool {
-    e.is_timeout() || e.is_connect() || e.is_request()
-}
-
 /// Is a response status worth retrying? Server errors and explicit throttling.
-pub fn transient_status(status: StatusCode) -> bool {
-    status.is_server_error() || status.as_u16() == 429
+pub fn transient_status(status: u16) -> bool {
+    (500..600).contains(&status) || status == 429
 }
 
 #[cfg(test)]
@@ -118,9 +79,11 @@ mod tests {
 
     #[test]
     fn transient_status_covers_5xx_and_429() {
-        assert!(transient_status(StatusCode::INTERNAL_SERVER_ERROR));
-        assert!(transient_status(StatusCode::TOO_MANY_REQUESTS));
-        assert!(!transient_status(StatusCode::NOT_FOUND));
-        assert!(!transient_status(StatusCode::FORBIDDEN));
+        assert!(transient_status(500));
+        assert!(transient_status(503));
+        assert!(transient_status(429));
+        assert!(!transient_status(404));
+        assert!(!transient_status(403));
+        assert!(!transient_status(202));
     }
 }

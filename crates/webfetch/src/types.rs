@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "native")]
 pub use crate::tls::TlsConfig;
 
 /// Whether a fetch actually produced content.
@@ -175,6 +176,7 @@ pub struct FetchOptions {
     /// TLS trust configuration (OS store is honoured by default; this carries
     /// the explicit `--ca-cert` / `--insecure` overrides).
     #[serde(default)]
+    #[cfg(feature = "native")]
     pub tls: TlsConfig,
 }
 
@@ -188,6 +190,7 @@ impl Default for FetchOptions {
             outline: false,
             grep: None,
             timeout_secs: 10,
+            #[cfg(feature = "native")]
             tls: TlsConfig::default(),
         }
     }

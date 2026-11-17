@@ -4,38 +4,65 @@
 //! scraped HTML it does not silently change shape or serve a challenge page.
 //! The key travels in `X-Subscription-Token`, never in the URL.
 
+use std::time::Duration;
+
+use url::Url;
+
 use crate::types::{SearchOptions, SearchResult, SearchStatus};
-use webfetch_core::http::read_body_capped;
+#[cfg(feature = "native")]
+use webfetch_core::transport::ReqwestTransport;
+use webfetch_core::transport::{HttpRequest, Method, Transport};
 
 const ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
 
+/// Search over the native transport.
+#[cfg(feature = "native")]
 pub async fn search(
     options: &SearchOptions,
     max: usize,
     api_key: &str,
 ) -> anyhow::Result<(Vec<SearchResult>, SearchStatus)> {
-    let client = super::client(options.timeout_secs, &options.tls)?;
+    let transport = ReqwestTransport::new(&options.tls)?;
+    search_with(&transport, options, max, api_key).await
+}
 
-    let mut request = client
-        .get(ENDPOINT)
-        .query(&[("q", options.query.as_str())])
-        .query(&[("count", max.min(20).to_string())])
-        .header("Accept", "application/json")
-        .header("X-Subscription-Token", api_key);
+/// Search through a caller-supplied transport.
+pub async fn search_with(
+    transport: &impl Transport,
+    options: &SearchOptions,
+    max: usize,
+    api_key: &str,
+) -> anyhow::Result<(Vec<SearchResult>, SearchStatus)> {
+    let mut query = vec![
+        ("q", options.query.clone()),
+        ("count", max.min(20).to_string()),
+    ];
     if let Some(safe) = options.safe_search {
-        request = request.query(&[("safesearch", if safe { "strict" } else { "off" })]);
+        query.push((
+            "safesearch",
+            if safe { "strict" } else { "off" }.to_string(),
+        ));
     }
+    let url = Url::parse_with_params(ENDPOINT, query)?;
 
-    let resp = request.send().await?;
-    let status = resp.status();
-    if !status.is_success() {
+    let request = HttpRequest {
+        method: Method::Get,
+        url: url.to_string(),
+        headers: vec![
+            ("Accept".to_string(), "application/json".to_string()),
+            ("X-Subscription-Token".to_string(), api_key.to_string()),
+        ],
+        body: None,
+        timeout: Some(Duration::from_secs(options.timeout_secs)),
+    };
+    let resp = super::send_following(transport, request, super::MAX_REDIRECTS).await?;
+    let body = String::from_utf8_lossy(&resp.body);
+    if !(200..300).contains(&resp.status) {
         // The body may carry Brave's own explanation (quota, bad key); the key
         // itself is a header, so nothing here can echo it back.
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("brave search failed ({status}): {}", body.trim());
+        anyhow::bail!("brave search failed ({}): {}", resp.status, body.trim());
     }
 
-    let body = read_body_capped(resp).await.map_err(|(e, _)| e)?;
     Ok(parse(&body, max))
 }
 

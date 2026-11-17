@@ -8,19 +8,24 @@
 // Shared primitives live in webfetch-core; re-export them so both this
 // crate's internal modules (via `crate::compress` / `crate::refs`) and
 // external callers keep a stable path.
-pub use webfetch_core::{charset, compress, http, refs, tls};
+#[cfg(feature = "native")]
+pub use webfetch_core::tls;
+pub use webfetch_core::{charset, compress, http, refs};
 
 pub mod convert;
 pub mod extract;
 pub mod fetch;
 pub mod grep;
+#[cfg(feature = "native")]
 pub mod guard;
 pub mod limits;
 pub mod media;
 pub mod outline;
 pub mod types;
 
+#[cfg(feature = "native")]
 pub use fetch::fetch_page;
+pub use fetch::fetch_with;
 use media::Media;
 use types::{ContentStatus, ContentType, FetchOptions, FetchResult, Metadata, UrlReference};
 
@@ -535,6 +540,7 @@ pub fn convert_page(page: fetch::FetchedPage, options: &FetchOptions) -> FetchRe
 }
 
 /// Fetch a URL and convert it according to `options`.
+#[cfg(feature = "native")]
 pub async fn fetch_and_convert(options: FetchOptions) -> anyhow::Result<FetchResult> {
     let page = fetch::fetch_page(&options.url, options.timeout_secs, &options.tls).await?;
     Ok(convert_page(page, &options))

@@ -14,11 +14,18 @@ categories = ["web-programming", "text-processing"]
 [lib]
 name = "webfetch_core"
 
+[features]
+default = ["native"]
+# Native HTTP over reqwest: `ReqwestTransport`, the OS trust store (`tls`).
+# Without it the crate is pure logic plus the `Transport` trait, so a host
+# that supplies its own transport (e.g. WASI `wasi:http`) builds without it.
+native = ["dep:reqwest", "dep:rustls-native-certs", "dep:anyhow"]
+
 [dependencies]
 serde = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
 encoding_rs = { workspace = true }
-reqwest = { workspace = true }
-rustls-native-certs = { workspace = true }
-anyhow = { workspace = true }
+anyhow = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }

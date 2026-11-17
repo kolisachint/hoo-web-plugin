@@ -13,7 +13,9 @@
 
 // Shared primitives from webfetch-core; re-exported so internal modules can
 // keep using `crate::compress` / `crate::refs`.
-pub use webfetch_core::{compress, http, refs, tls};
+#[cfg(feature = "native")]
+pub use webfetch_core::tls;
+pub use webfetch_core::{compress, http, refs};
 
 pub mod extract;
 pub mod providers;
@@ -125,13 +127,24 @@ pub fn build_output_from_ddg(query: &str, html: &str, max_results: usize) -> Sea
     build_output(query, results, status, "duckduckgo")
 }
 
-/// Run a query against the configured provider, falling back to
-/// `options.fallback` when the primary errors or is blocked.
+/// Run a query against the configured provider over the native transport,
+/// falling back to `options.fallback` when the primary errors or is blocked.
 ///
 /// A fallback is never silent: [`SearchOutput::provider`] records which backend
 /// actually answered, so a caller can tell a Brave answer from a scraped one.
+#[cfg(feature = "native")]
 pub async fn run_search(options: SearchOptions) -> anyhow::Result<SearchOutput> {
-    let primary = attempt_provider(&options.provider, &options).await;
+    let transport = webfetch_core::transport::ReqwestTransport::new(&options.tls)?;
+    run_search_with(&transport, options).await
+}
+
+/// As [`run_search`], through a caller-supplied transport. The same transport
+/// serves the primary and the fallback.
+pub async fn run_search_with(
+    transport: &impl webfetch_core::transport::Transport,
+    options: SearchOptions,
+) -> anyhow::Result<SearchOutput> {
+    let primary = attempt_provider(transport, &options.provider, &options).await;
 
     let primary_answered = matches!(&primary, Ok(out) if !out.status.is_failure());
     if primary_answered {
@@ -139,7 +152,7 @@ pub async fn run_search(options: SearchOptions) -> anyhow::Result<SearchOutput> 
     }
 
     if let Some(fallback) = &options.fallback {
-        if let Ok(out) = attempt_provider(fallback, &options).await {
+        if let Ok(out) = attempt_provider(transport, fallback, &options).await {
             if !out.status.is_failure() {
                 return Ok(out);
             }
@@ -151,10 +164,11 @@ pub async fn run_search(options: SearchOptions) -> anyhow::Result<SearchOutput> 
 }
 
 async fn attempt_provider(
+    transport: &impl webfetch_core::transport::Transport,
     provider: &Provider,
     options: &SearchOptions,
 ) -> anyhow::Result<SearchOutput> {
-    let (results, status) = provider.search(options).await?;
+    let (results, status) = provider.search_with(transport, options).await?;
     Ok(build_output(
         &options.query,
         results,

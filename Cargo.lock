@@ -1932,7 +1932,6 @@ dependencies = [
  "ego-tree",
  "once_cell",
  "regex",
- "reqwest",
  "scraper",
  "serde",
  "serde_json",
@@ -1947,7 +1946,6 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "once_cell",
- "reqwest",
  "scraper",
  "serde",
  "serde_json",
