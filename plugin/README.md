@@ -62,11 +62,21 @@ plugin/build.sh
 ```
 
 The script builds `plugin/component` in release mode (`opt-level = "s"`, LTO,
-stripped) and copies the result to `dev.hoocode/extension.wasm`. On one checkout
-the build is byte-reproducible across target directories: the script keeps its
-target directory outside the repository and remaps paths. The bytes differ
-between checkout paths (a few code bytes, cause not yet found), so a rebuild
-from another clone is not byte-identical to the committed file. Set
+stripped) and copies the result to `dev.hoocode/extension.wasm`. The build is
+byte-reproducible from any checkout path and any target directory:
+
+- The sources are copied to a fixed staging path (`/tmp/webtools-plugin-src`)
+  and built there. Cargo hashes the absolute path of the path dependencies in
+  `crates/` into the crate metadata, which changes the code layout, so the path
+  must be the same for every clone. Do not make the staging path configurable.
+- Paths in the output are remapped: the staging tree, the target directory, the
+  cargo home and the rustup sysroot.
+- The build uses `--locked`.
+
+The output depends on the rustc version. CI pins `1.97.0`, so rebuild with that
+version: `rustup toolchain install 1.97.0 -t wasm32-wasip2` and
+`RUSTUP_TOOLCHAIN=1.97.0 plugin/build.sh`. CI runs `git diff --exit-code` on the
+artifact, so a rebuild with another compiler changes the committed file. Set
 `WEBTOOLS_TARGET_DIR` to choose the target directory.
 
 The WIT file in `component/wit/` is a copy of hoocode's `wit/extension.wit`. It

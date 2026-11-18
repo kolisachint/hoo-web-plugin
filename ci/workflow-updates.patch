@@ -1,8 +1,8 @@
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index 1b42220..3f5d9ff 100644
+index 1b42220..0d25818 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
-@@ -20,6 +20,81 @@ jobs:
+@@ -20,6 +20,83 @@ jobs:
        - name: Format
          run: cargo fmt --all --check
        - name: Clippy
@@ -63,17 +63,17 @@ index 1b42220..3f5d9ff 100644
 +      - name: Clippy
 +        run: cargo clippy -p webtools-core -p webtools-fetch -p webtools-search --target wasm32-wasip2 --no-default-features --features wasi --locked -- -D warnings
 +
-+  # The webtools plugin's WASI component (plugin/). Built with plugin/build.sh and
-+  # uploaded. The job does not compare the result with the committed
-+  # plugin/dev.hoocode/extension.wasm: the build is reproducible on one checkout
-+  # and across target directories, but not across checkout paths, and CI always
-+  # runs at a new path. Commit a rebuilt artifact by hand (plugin/build.sh).
++  # The webtools plugin's WASI component (plugin/). Built with plugin/build.sh,
++  # uploaded, and compared byte for byte with the committed
++  # plugin/dev.hoocode/extension.wasm. The toolchain is pinned: the bytes depend
++  # on the rustc version, so a move of `stable` would fail this job. When the
++  # pin changes or the component changes, rebuild and commit the artifact.
 +  plugin:
-+    name: plugin component (build only)
++    name: plugin component
 +    runs-on: ubuntu-latest
 +    steps:
 +      - uses: actions/checkout@v4
-+      - uses: dtolnay/rust-toolchain@stable
++      - uses: dtolnay/rust-toolchain@1.97.0
 +      - name: Add the wasm target
 +        run: rustup target add wasm32-wasip2
 +      - uses: Swatinem/rust-cache@v2
@@ -86,6 +86,8 @@ index 1b42220..3f5d9ff 100644
 +        with:
 +          name: webtools-extension-wasm
 +          path: plugin/dev.hoocode/extension.wasm
++      - name: Compare with the committed component
++        run: git diff --exit-code plugin/dev.hoocode/extension.wasm
 diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
 index 7529b57..fd8cc12 100644
 --- a/.github/workflows/release.yml
