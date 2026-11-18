@@ -11,6 +11,8 @@ lockstep semantic versioning across all crates.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-18
+
 ### Added
 
 - **hoocode plugin `webtools`** (`plugin/`). An Agent Plugins 1.0 package with
