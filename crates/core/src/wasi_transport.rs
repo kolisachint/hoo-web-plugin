@@ -6,11 +6,13 @@
 //! trust. The caller's host must enforce those itself. Its refusals surface as
 //! `TransportError::Other("denied by host: ...")`.
 //!
-//! Every call is synchronous. Pollables are waited on with `.block()`, and no
-//! `.await` is taken while a WASI resource is alive. That keeps the futures
-//! `Send` even though WASI resources are not.
+//! Every call is synchronous and takes no `.await` while a WASI resource is
+//! alive. That keeps the futures `Send` even though WASI resources are not.
+//! Waiting is done with `poll` over the operation's pollable and a monotonic
+//! timer, so one `timeout` bounds the whole request: the connect, the headers
+//! and the body together.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use url::Url;
 use wasip2::clocks::monotonic_clock;
@@ -19,12 +21,13 @@ use wasip2::http::types::{
     ErrorCode, Fields, IncomingBody, Method as WasiMethod, OutgoingBody, OutgoingRequest,
     RequestOptions, Scheme,
 };
+use wasip2::io::poll::{self, Pollable};
 use wasip2::io::streams::{InputStream, OutputStream, StreamError};
 
-use crate::http::{push_capped, MAX_BODY_BYTES, USER_AGENT};
+use crate::http::{push_capped, ERROR_BODY_CAP, MAX_BODY_BYTES, USER_AGENT};
 use crate::transport::{HttpRequest, HttpResponse, Method, Transport, TransportError};
 
-/// Most bytes one `blocking-read` call asks for.
+/// Most bytes one `read` call asks for.
 const READ_CHUNK: u64 = 64 * 1024;
 
 /// `blocking-write-and-flush` accepts at most this many bytes per call.
@@ -59,10 +62,29 @@ fn other(msg: &str) -> TransportError {
     TransportError::Other(msg.to_string())
 }
 
+/// Wait until `pollable` is ready or `deadline` (monotonic nanoseconds) passes.
+/// Returns whether the pollable is ready. With no deadline it waits unbounded.
+/// The timer has no parent resource. Callers drop their own pollable before the
+/// resource it came from.
+fn wait_ready(pollable: &Pollable, deadline: Option<u64>) -> bool {
+    let Some(deadline) = deadline else {
+        pollable.block();
+        return true;
+    };
+    if pollable.ready() {
+        return true;
+    }
+    let timer = monotonic_clock::subscribe_instant(deadline);
+    let _ = poll::poll(&[pollable, &timer]);
+    pollable.ready()
+}
+
 /// One request, one hop. The whole exchange, including the body read, runs
-/// without yielding to an executor.
+/// without yielding to an executor, and stops at the request's timeout.
 fn send_blocking(req: HttpRequest) -> Result<HttpResponse, TransportError> {
-    let deadline = req.timeout.map(|t| Instant::now() + t);
+    let deadline = req
+        .timeout
+        .map(|t| monotonic_clock::now().saturating_add(nanos(t)));
 
     let url = Url::parse(&req.url)
         .map_err(|e| TransportError::Other(format!("invalid URL `{}`: {e}", req.url)))?;
@@ -120,16 +142,24 @@ fn send_blocking(req: HttpRequest) -> Result<HttpResponse, TransportError> {
     if let Some(bytes) = &req.body {
         write_body(&out_body, bytes)?;
     }
-    OutgoingBody::finish(out_body, None).map_err(map_error_code)?;
+    OutgoingBody::finish(out_body, None).map_err(|c| map_error_code(c, &req.url))?;
 
     let options = request_options(req.timeout)?;
-    let future = outgoing_handler::handle(request, options).map_err(map_error_code)?;
-    future.subscribe().block();
+    let future =
+        outgoing_handler::handle(request, options).map_err(|c| map_error_code(c, &req.url))?;
+    let ready = {
+        let pollable = future.subscribe();
+        wait_ready(&pollable, deadline)
+    };
+    if !ready {
+        // Dropping `future` cancels the exchange on the host side.
+        return Err(TransportError::Timeout(req.url.clone()));
+    }
     let response = match future.get() {
         Some(Ok(Ok(resp))) => resp,
-        Some(Ok(Err(code))) => return Err(map_error_code(code)),
+        Some(Ok(Err(code))) => return Err(map_error_code(code, &req.url)),
         Some(Err(())) => return Err(other("response was already taken")),
-        None => return Err(other("response not ready after blocking on it")),
+        None => return Err(other("response not ready after waiting on it")),
     };
 
     let status = response.status();
@@ -145,7 +175,13 @@ fn send_blocking(req: HttpRequest) -> Result<HttpResponse, TransportError> {
     let incoming = response
         .consume()
         .map_err(|()| other("response body was already taken"))?;
-    let body = read_body(&incoming, deadline)?;
+    // A redirect's body is never used, so it is not read. Error bodies are
+    // kept only for the message, so they get the smaller cap.
+    let body = match status {
+        300..=399 => Vec::new(),
+        400..=599 => read_body(&incoming, &req.url, deadline, ERROR_BODY_CAP)?,
+        _ => read_body(&incoming, &req.url, deadline, MAX_BODY_BYTES)?,
+    };
     // The stream is a child of the body and is dropped by `read_body`, so the
     // body can now be finished.
     let _ = IncomingBody::finish(incoming);
@@ -164,9 +200,9 @@ fn wasi_method(method: Method) -> WasiMethod {
     }
 }
 
-/// Connect, first-byte and between-bytes limits all take the request timeout.
-/// `wasi:http` has no single whole-request limit, so [`read_body`] also checks
-/// the deadline between chunks.
+/// Connect, first-byte and between-bytes limits all take the request timeout,
+/// so the host also gives up early. The whole-request bound is enforced by
+/// [`wait_ready`] against the deadline, not by these limits.
 fn request_options(timeout: Option<Duration>) -> Result<Option<RequestOptions>, TransportError> {
     let Some(timeout) = timeout else {
         return Ok(None);
@@ -198,20 +234,30 @@ fn write_body(body: &OutgoingBody, bytes: &[u8]) -> Result<(), TransportError> {
     Ok(())
 }
 
-/// Read a response body under the same cap as the native transport:
-/// oversized bodies are truncated, not rejected.
-fn read_body(body: &IncomingBody, deadline: Option<Instant>) -> Result<Vec<u8>, TransportError> {
+/// Read a response body under `cap`, waiting for each chunk against the
+/// request deadline. Oversized bodies are truncated, not rejected, as on the
+/// native transport.
+fn read_body(
+    body: &IncomingBody,
+    target: &str,
+    deadline: Option<u64>,
+    cap: usize,
+) -> Result<Vec<u8>, TransportError> {
     let stream: InputStream = body
         .stream()
         .map_err(|()| other("response body stream is unavailable"))?;
     let mut buf = Vec::new();
     loop {
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            return Err(TransportError::Timeout);
+        let ready = {
+            let pollable = stream.subscribe();
+            wait_ready(&pollable, deadline)
+        };
+        if !ready {
+            return Err(TransportError::Timeout(target.to_string()));
         }
-        match stream.blocking_read(READ_CHUNK) {
+        match stream.read(READ_CHUNK) {
             Ok(chunk) => {
-                if push_capped(&mut buf, &chunk, MAX_BODY_BYTES) {
+                if push_capped(&mut buf, &chunk, cap) {
                     break;
                 }
             }
@@ -228,18 +274,17 @@ fn read_body(body: &IncomingBody, deadline: Option<Instant>) -> Result<Vec<u8>, 
 
 /// Map a host error onto the transport's categories. Timeouts and connection
 /// failures are transient; TLS and everything else are final.
-fn map_error_code(code: ErrorCode) -> TransportError {
+fn map_error_code(code: ErrorCode, target: &str) -> TransportError {
     let detail = format!("{code:?}");
     match code {
         ErrorCode::DnsTimeout
         | ErrorCode::ConnectionTimeout
         | ErrorCode::ConnectionReadTimeout
         | ErrorCode::ConnectionWriteTimeout
-        | ErrorCode::HttpResponseTimeout => TransportError::Timeout,
+        | ErrorCode::HttpResponseTimeout => TransportError::Timeout(target.to_string()),
         ErrorCode::DnsError(_)
         | ErrorCode::DestinationNotFound
         | ErrorCode::DestinationUnavailable
-        | ErrorCode::DestinationIpProhibited
         | ErrorCode::DestinationIpUnroutable
         | ErrorCode::ConnectionRefused
         | ErrorCode::ConnectionTerminated
@@ -247,9 +292,8 @@ fn map_error_code(code: ErrorCode) -> TransportError {
         ErrorCode::TlsProtocolError
         | ErrorCode::TlsCertificateError
         | ErrorCode::TlsAlertReceived(_) => TransportError::Tls(detail),
-        ErrorCode::HttpRequestDenied => {
-            TransportError::Other("denied by host: request denied".to_string())
-        }
+        ErrorCode::DestinationIpProhibited => other("denied by host: destination IP prohibited"),
+        ErrorCode::HttpRequestDenied => other("denied by host: request denied"),
         _ => TransportError::Other(detail),
     }
 }

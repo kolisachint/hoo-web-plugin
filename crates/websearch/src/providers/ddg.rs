@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use webfetch_core::http::transient_status;
+use webfetch_core::http::{status_text, transient_status};
 #[cfg(feature = "native")]
 use webfetch_core::transport::ReqwestTransport;
 use webfetch_core::transport::{HttpRequest, Method, Transport};
@@ -114,13 +114,25 @@ async fn attempt(
     let status = resp.status;
     if status == CHALLENGE_STATUS {
         return Err((
-            anyhow::anyhow!("DuckDuckGo returned {status} (rate limited or challenged)"),
+            anyhow::anyhow!(
+                "DuckDuckGo returned {} (rate limited or challenged)",
+                status_text(status)
+            ),
             true,
         ));
     }
     if status >= 400 {
+        let kind = if status >= 500 {
+            "server error"
+        } else {
+            "client error"
+        };
         return Err((
-            anyhow::anyhow!("HTTP status {status} for url ({})", request.url),
+            anyhow::anyhow!(
+                "HTTP status {kind} ({}) for url ({})",
+                status_text(status),
+                request.url
+            ),
             transient_status(status),
         ));
     }

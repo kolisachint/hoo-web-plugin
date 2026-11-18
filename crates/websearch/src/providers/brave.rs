@@ -60,7 +60,11 @@ pub async fn search_with(
     if !(200..300).contains(&resp.status) {
         // The body may carry Brave's own explanation (quota, bad key); the key
         // itself is a header, so nothing here can echo it back.
-        anyhow::bail!("brave search failed ({}): {}", resp.status, body.trim());
+        anyhow::bail!(
+            "brave search failed ({}): {}",
+            webfetch_core::http::status_text(resp.status),
+            body.trim()
+        );
     }
 
     Ok(parse(&body, max))

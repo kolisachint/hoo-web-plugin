@@ -24,6 +24,10 @@ pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36
 /// bounds a decompression bomb.
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
+/// Cap on a 4xx or 5xx body (64 KiB). Error bodies only feed a message, and
+/// the provider's own explanation fits well inside this.
+pub const ERROR_BODY_CAP: usize = 64 * 1024;
+
 /// Append as much of `chunk` to `buf` as fits under `max`. Returns `true` once
 /// the cap is reached (the body is truncated and the caller should stop).
 #[cfg_attr(not(any(feature = "native", feature = "wasi")), allow(dead_code))]
@@ -43,9 +47,68 @@ pub fn transient_status(status: u16) -> bool {
     (500..600).contains(&status) || status == 429
 }
 
+/// A status code and its reason phrase, as `404 Not Found`. A code with no
+/// standard phrase is shown as the number alone.
+///
+/// Native builds take the phrase from reqwest's `StatusCode`, so every
+/// registered code is covered. The WASI build has no HTTP crate of its own and
+/// uses a table of the codes the libraries meet in practice.
+pub fn status_text(status: u16) -> String {
+    #[cfg(feature = "native")]
+    let reason = reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|code| code.canonical_reason());
+    #[cfg(not(feature = "native"))]
+    let reason = wasi_reason(status);
+    match reason {
+        Some(reason) => format!("{status} {reason}"),
+        None => status.to_string(),
+    }
+}
+
+#[cfg(not(feature = "native"))]
+fn wasi_reason(status: u16) -> Option<&'static str> {
+    Some(match status {
+        200 => "OK",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_text_names_the_reason_phrase() {
+        assert_eq!(status_text(404), "404 Not Found");
+        assert_eq!(status_text(401), "401 Unauthorized");
+        // No standard phrase: the number alone.
+        assert_eq!(status_text(799), "799");
+    }
 
     #[test]
     fn push_capped_truncates_oversized_chunk() {

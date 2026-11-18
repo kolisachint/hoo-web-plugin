@@ -19,7 +19,7 @@ use std::future::Future;
 use std::time::Duration;
 
 #[cfg(feature = "native")]
-use crate::http::{push_capped, MAX_BODY_BYTES, USER_AGENT};
+use crate::http::{push_capped, ERROR_BODY_CAP, MAX_BODY_BYTES, USER_AGENT};
 #[cfg(feature = "native")]
 use crate::tls::TlsConfig;
 #[cfg(feature = "wasi")]
@@ -66,8 +66,8 @@ impl HttpResponse {
 /// Why a request produced no response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
-    /// The request did not finish within its timeout.
-    Timeout,
+    /// The request did not finish within its timeout. Carries the URL.
+    Timeout(String),
     /// The connection could not be made or the request could not be sent.
     Connect(String),
     /// The TLS handshake or certificate check failed.
@@ -84,14 +84,17 @@ impl TransportError {
     /// are; TLS, oversize and other errors are final. This is the classification
     /// the native path has always used.
     pub fn is_transient(&self) -> bool {
-        matches!(self, TransportError::Timeout | TransportError::Connect(_))
+        matches!(
+            self,
+            TransportError::Timeout(_) | TransportError::Connect(_)
+        )
     }
 }
 
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TransportError::Timeout => write!(f, "request timed out"),
+            TransportError::Timeout(url) => write!(f, "request timed out for url ({url})"),
             TransportError::Connect(m) => write!(f, "{m}"),
             TransportError::Tls(m) => write!(f, "TLS error: {m}"),
             TransportError::BodyTooLarge => write!(f, "response body exceeds the size cap"),
@@ -180,36 +183,46 @@ impl ReqwestTransport {
     }
 }
 
+/// The reqwest error with its whole source chain, e.g. `error sending request
+/// for url (...): client error (Connect): tcp connect error: Connection refused`.
+/// reqwest's own Display stops at the top level and hides the cause.
 #[cfg(feature = "native")]
-fn map_send_error(e: reqwest::Error) -> TransportError {
+fn error_chain(e: reqwest::Error) -> String {
+    format!("{:#}", anyhow::Error::from(e))
+}
+
+#[cfg(feature = "native")]
+fn map_send_error(e: reqwest::Error, url: &str) -> TransportError {
     if e.is_timeout() {
-        TransportError::Timeout
+        TransportError::Timeout(url.to_string())
     } else if e.is_connect() || e.is_request() {
-        TransportError::Connect(e.to_string())
+        TransportError::Connect(error_chain(e))
     } else {
-        TransportError::Other(e.to_string())
+        TransportError::Other(error_chain(e))
     }
 }
 
-/// Read a body under the cap. Oversized bodies are truncated, not rejected,
+/// Read a body under `cap`. Oversized bodies are truncated, not rejected,
 /// which is the behaviour the fetch and search paths have always had.
 #[cfg(feature = "native")]
-async fn read_capped(mut resp: reqwest::Response) -> Result<Vec<u8>, TransportError> {
+async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, TransportError> {
     let mut buf: Vec<u8> = Vec::new();
     // Honour Content-Length to pre-size, but never trust it past the cap.
     if let Some(len) = resp.content_length() {
-        buf.reserve(len.min(MAX_BODY_BYTES as u64) as usize);
+        buf.reserve(len.min(cap as u64) as usize);
     }
     loop {
         match resp.chunk().await {
             Ok(Some(chunk)) => {
-                if push_capped(&mut buf, &chunk, MAX_BODY_BYTES) {
+                if push_capped(&mut buf, &chunk, cap) {
                     break;
                 }
             }
             Ok(None) => break,
-            Err(e) if e.is_timeout() => return Err(TransportError::Timeout),
-            Err(e) => return Err(TransportError::Other(e.to_string())),
+            Err(e) if e.is_timeout() => {
+                return Err(TransportError::Timeout(resp.url().to_string()))
+            }
+            Err(e) => return Err(TransportError::Other(error_chain(e))),
         }
     }
     Ok(buf)
@@ -232,14 +245,23 @@ impl Transport for ReqwestTransport {
             builder = builder.timeout(timeout);
         }
 
-        let resp = builder.send().await.map_err(map_send_error)?;
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| map_send_error(e, &req.url))?;
         let status = resp.status().as_u16();
         let headers = resp
             .headers()
             .iter()
             .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
             .collect();
-        let body = read_capped(resp).await?;
+        // A redirect's body is never used: the caller follows the Location.
+        // Error bodies are kept only for the message, so they get a small cap.
+        let body = match status {
+            300..=399 => Vec::new(),
+            400..=599 => read_capped(resp, ERROR_BODY_CAP).await?,
+            _ => read_capped(resp, MAX_BODY_BYTES).await?,
+        };
         Ok(HttpResponse {
             status,
             headers,
@@ -269,7 +291,7 @@ mod tests {
 
     #[test]
     fn only_timeouts_and_connection_failures_are_transient() {
-        assert!(TransportError::Timeout.is_transient());
+        assert!(TransportError::Timeout("https://example.test/".into()).is_transient());
         assert!(TransportError::Connect("refused".into()).is_transient());
         assert!(!TransportError::Tls("unknown issuer".into()).is_transient());
         assert!(!TransportError::BodyTooLarge.is_transient());
@@ -280,5 +302,28 @@ mod tests {
     #[test]
     fn native_transport_builds_from_default_tls() {
         assert!(ReqwestTransport::new(&TlsConfig::default()).is_ok());
+    }
+
+    /// A closed local port: the error must keep the OS cause, not just
+    /// reqwest's top-level "error sending request" text.
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn connection_refused_keeps_the_cause() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let transport = ReqwestTransport::new(&TlsConfig::default()).unwrap();
+        let err = transport
+            .send(HttpRequest {
+                method: Method::Get,
+                url: format!("http://127.0.0.1:{port}/"),
+                headers: Vec::new(),
+                body: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TransportError::Connect(_)), "{err:?}");
+        assert!(err.to_string().contains("Connection refused"), "{err}");
     }
 }

@@ -9,7 +9,7 @@ use crate::guard;
 #[cfg(feature = "native")]
 use crate::tls::TlsConfig;
 use webfetch_core::charset;
-use webfetch_core::http::transient_status;
+use webfetch_core::http::{status_text, transient_status};
 #[cfg(feature = "native")]
 use webfetch_core::transport::ReqwestTransport;
 use webfetch_core::transport::{HttpRequest, Method, Transport};
@@ -152,8 +152,16 @@ async fn attempt<T: Transport>(
     }
 
     if !(200..300).contains(&status) {
+        let kind = if status >= 500 {
+            "server error"
+        } else {
+            "client error"
+        };
         return Err((
-            anyhow::anyhow!("HTTP status {status} for url ({url})"),
+            anyhow::anyhow!(
+                "HTTP status {kind} ({}) for url ({url})",
+                status_text(status)
+            ),
             transient_status(status),
         ));
     }

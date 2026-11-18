@@ -50,7 +50,11 @@ pub async fn search_with(
     let resp = super::send_following(transport, request, super::MAX_REDIRECTS).await?;
     let body = String::from_utf8_lossy(&resp.body);
     if !(200..300).contains(&resp.status) {
-        anyhow::bail!("tavily search failed ({}): {}", resp.status, body.trim());
+        anyhow::bail!(
+            "tavily search failed ({}): {}",
+            webfetch_core::http::status_text(resp.status),
+            body.trim()
+        );
     }
 
     Ok(parse(&body, max))
