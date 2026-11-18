@@ -144,6 +144,7 @@ pub async fn run_search_with(
     transport: &impl webfetch_core::transport::Transport,
     options: SearchOptions,
 ) -> anyhow::Result<SearchOutput> {
+    options.validate()?;
     let primary = attempt_provider(transport, &options.provider, &options).await;
 
     let primary_answered = matches!(&primary, Ok(out) if !out.status.is_failure());

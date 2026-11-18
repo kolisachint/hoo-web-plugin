@@ -150,16 +150,50 @@ impl ContentType {
     }
 }
 
+/// A request the conversion cannot honour as asked.
+///
+/// Raised before any content is produced, so a caller can report the request
+/// as wrong rather than returning a page that looks like it said nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionsError {
+    /// `max_tokens` of zero leaves no room for any content.
+    ZeroMaxTokens,
+    /// The `grep` pattern does not compile.
+    InvalidPattern { pattern: String, reason: String },
+    /// `offset` is at or past the end of the text it indexes.
+    OffsetPastEnd { offset: usize, total_bytes: usize },
+}
+
+impl std::fmt::Display for OptionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OptionsError::ZeroMaxTokens => write!(f, "max_tokens must be at least 1"),
+            OptionsError::InvalidPattern { pattern, reason } => {
+                write!(f, "invalid grep pattern /{pattern}/: {reason}")
+            }
+            OptionsError::OffsetPastEnd {
+                offset,
+                total_bytes,
+            } => write!(
+                f,
+                "offset {offset} is past the end of the content ({total_bytes} bytes)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OptionsError {}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FetchOptions {
     pub url: String,
     pub content_type: ContentType,
     pub max_tokens: Option<usize>,
     /// Byte offset into the extracted body to start from, for reading a long
-    /// document one window at a time. Clamped and snapped to a character
-    /// boundary, so a stale or hand-written offset shortens the window rather
-    /// than failing. Ignored by structured output, which is addressed by
-    /// blocks rather than bytes.
+    /// document one window at a time. A non-zero offset at or past the end of
+    /// the body is an [`OptionsError::OffsetPastEnd`]. Otherwise it is snapped
+    /// back to a character boundary. Ignored by structured output, which is
+    /// addressed by blocks rather than bytes.
     #[serde(default)]
     pub offset: usize,
     /// Return the document's outline — its headings, and the offset that reads
@@ -178,6 +212,25 @@ pub struct FetchOptions {
     #[serde(default)]
     #[cfg(feature = "native")]
     pub tls: TlsConfig,
+}
+
+impl FetchOptions {
+    /// Check the options that can be wrong on their own: a zero budget and a
+    /// `grep` pattern that does not compile. Callers run this before a request,
+    /// so a bad argument costs no download. The offset is checked against the
+    /// content, so it is only known once the page is converted.
+    pub fn validate(&self) -> Result<(), OptionsError> {
+        if self.max_tokens == Some(0) {
+            return Err(OptionsError::ZeroMaxTokens);
+        }
+        if let Some(pattern) = &self.grep {
+            crate::grep::compile(pattern).map_err(|e| OptionsError::InvalidPattern {
+                pattern: pattern.clone(),
+                reason: e.to_string(),
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for FetchOptions {

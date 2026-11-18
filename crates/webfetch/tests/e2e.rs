@@ -2,7 +2,7 @@ use webfetch::compress::{compress_text, estimate_tokens, truncate_to_tokens};
 use webfetch::convert::convert;
 use webfetch::convert::text::{html_to_text_with_refs, render_references};
 use webfetch::media::{classify, Media};
-use webfetch::types::{ContentStatus, ContentType, FetchOptions};
+use webfetch::types::{ContentStatus, ContentType, FetchOptions, OptionsError};
 use webfetch::{convert_body, convert_html};
 
 const DOCS: &str = include_str!("fixtures/docs.html");
@@ -99,7 +99,8 @@ fn test_text_output_appends_reference_block() {
         "https://blog.example.com/post",
         Some("text/html"),
         &FetchOptions::default(),
-    );
+    )
+    .expect("convert");
     assert!(r.content.contains("references page [1]"));
     assert!(r.content.contains("References:"));
     assert!(r.content.contains("[1] https://blog.example.com/refs"));
@@ -132,7 +133,7 @@ fn test_truncation_keeps_complete_reference_block() {
         max_tokens: Some(120),
         ..FetchOptions::default()
     };
-    let r = convert_body(&html, "https://example.com/", Some("text/html"), &opts);
+    let r = convert_body(&html, "https://example.com/", Some("text/html"), &opts).expect("convert");
 
     // The budget is actually honoured. Reserving room for the *whole*
     // reference block and appending it regardless used to overshoot a small
@@ -201,7 +202,8 @@ fn test_link_dense_page_respects_a_small_budget() {
             max_tokens: Some(budget),
             ..FetchOptions::default()
         };
-        let r = convert_body(&html, "https://example.com/", Some("text/html"), &opts);
+        let r =
+            convert_body(&html, "https://example.com/", Some("text/html"), &opts).expect("convert");
         assert!(
             r.token_estimate <= budget,
             "budget {budget} -> estimate {}",
@@ -227,7 +229,7 @@ fn test_structured_output_stays_valid_json_under_a_budget() {
         max_tokens: Some(150),
         ..FetchOptions::default()
     };
-    let r = convert_body(&html, "https://example.com/", Some("text/html"), &opts);
+    let r = convert_body(&html, "https://example.com/", Some("text/html"), &opts).expect("convert");
     let v: serde_json::Value =
         serde_json::from_str(&r.content).expect("structured output must stay parseable");
     assert!(v["blocks"].is_array());
@@ -271,7 +273,7 @@ fn test_leading_title_not_duplicated_in_body() {
     let html = "<html><head><title>Widgets Guide</title></head>\
                 <body><article><h1>Widgets Guide</h1>\
                 <p>Body content here.</p></article></body></html>";
-    let r = convert_html(html, "https://example.com/p", &FetchOptions::default());
+    let r = convert_html(html, "https://example.com/p", &FetchOptions::default()).expect("convert");
     assert_eq!(r.title, "Widgets Guide");
     // The body must not open with a second copy of the title.
     assert!(
@@ -288,7 +290,7 @@ fn test_distinct_heading_is_kept() {
     let html = "<html><head><title>Site Name</title></head>\
                 <body><article><h1>Real Article Heading</h1>\
                 <p>Words.</p></article></body></html>";
-    let r = convert_html(html, "https://example.com/p", &FetchOptions::default());
+    let r = convert_html(html, "https://example.com/p", &FetchOptions::default()).expect("convert");
     assert_eq!(r.title, "Site Name");
     assert!(r.content.contains("Real Article Heading"));
 }
@@ -356,7 +358,8 @@ fn test_spa_shell_yields_empty_body() {
 /// caller could not tell a blank page from a page that needs a browser.
 #[test]
 fn test_spa_shell_is_reported_as_needing_js() {
-    let r = convert_html(SPA, "https://spa.example.com/", &FetchOptions::default());
+    let r =
+        convert_html(SPA, "https://spa.example.com/", &FetchOptions::default()).expect("convert");
     assert_eq!(r.status, ContentStatus::NeedsJs);
     assert!(r.status.is_failure());
     assert!(r.status.note().is_some());
@@ -374,7 +377,7 @@ fn test_pathological_nesting_is_refused_quickly() {
         "</div>".repeat(depth)
     );
     let start = std::time::Instant::now();
-    let r = convert_html(&html, "https://example.com/", &FetchOptions::default());
+    let r = convert_html(&html, "https://example.com/", &FetchOptions::default()).expect("convert");
     assert_eq!(r.status, ContentStatus::TooComplex);
     assert!(
         start.elapsed() < std::time::Duration::from_secs(5),
@@ -391,7 +394,8 @@ fn test_source_records_the_requested_url() {
         BLOG,
         "https://blog.example.com/post",
         &FetchOptions::default(),
-    );
+    )
+    .expect("convert");
     assert_eq!(r.source, "https://blog.example.com/post");
     assert_eq!(r.final_url, "https://blog.example.com/post");
 }
@@ -429,7 +433,8 @@ fn test_json_passthrough_is_pretty_printed() {
         "https://api.test/x",
         Some("application/json"),
         &opts,
-    );
+    )
+    .expect("convert");
     assert_eq!(r.media, "json");
     assert!(r.references.is_empty());
     // Pretty-printed (indented), not the compact input.
@@ -444,7 +449,8 @@ fn test_text_passthrough_is_verbatim() {
         "https://x.test/readme.md",
         Some("text/markdown"),
         &opts,
-    );
+    )
+    .expect("convert");
     assert_eq!(r.media, "text");
     assert_eq!(r.content, "# Title\n\nsome *markdown*");
 }
@@ -457,7 +463,8 @@ fn test_binary_media_is_summarized_not_rendered() {
         "https://x.test/a.png",
         Some("image/png"),
         &opts,
-    );
+    )
+    .expect("convert");
     assert_eq!(r.media, "image/png");
     assert!(r.content.contains("not rendered"), "content: {}", r.content);
 }
@@ -470,7 +477,8 @@ fn test_html_path_still_extracts_refs_and_media() {
         "https://docs.example.com/page",
         Some("text/html"),
         &opts,
-    );
+    )
+    .expect("convert");
     assert_eq!(r.media, "html");
     assert_eq!(r.references.len(), 3);
     assert!(r.content.contains("users endpoint [1]"));
@@ -489,7 +497,7 @@ fn test_metadata_extraction() {
         <meta property="og:site_name" content="Example Docs">
       </head>
       <body><article><p>Body.</p></article></body></html>"#;
-    let r = convert_html(html, "https://example.com/p", &FetchOptions::default());
+    let r = convert_html(html, "https://example.com/p", &FetchOptions::default()).expect("convert");
     assert_eq!(r.title, "Meta Test");
     assert_eq!(r.metadata.description.as_deref(), Some("A short summary."));
     assert_eq!(r.metadata.author.as_deref(), Some("Ada Lovelace"));
@@ -514,7 +522,7 @@ fn page_through(html: &str, max_tokens: usize) -> Vec<(usize, usize)> {
             offset: start,
             ..Default::default()
         };
-        let result = convert_html(html, "https://example.com/doc", &options);
+        let result = convert_html(html, "https://example.com/doc", &options).expect("convert");
         let end = result.next_offset.unwrap_or(result.total_bytes);
         spans.push((result.offset, end));
         assert!(spans.len() < 500, "paging failed to terminate");
@@ -531,7 +539,7 @@ fn a_budgeted_fetch_reports_the_document_it_is_a_slice_of() {
         max_tokens: Some(40),
         ..Default::default()
     };
-    let result = convert_html(DOCS, "https://example.com/doc", &options);
+    let result = convert_html(DOCS, "https://example.com/doc", &options).expect("convert");
 
     assert!(
         result.truncated,
@@ -569,7 +577,9 @@ fn following_next_offset_covers_the_document_once() {
         max_tokens: Some(12),
         ..Default::default()
     };
-    let total = convert_html(DOCS, "https://example.com/doc", &options).total_bytes;
+    let total = convert_html(DOCS, "https://example.com/doc", &options)
+        .expect("convert")
+        .total_bytes;
     assert_eq!(last.1, total, "the last window ends at the document's end");
 }
 
@@ -581,17 +591,17 @@ fn an_unbudgeted_fetch_reports_no_continuation() {
         max_tokens: None,
         ..Default::default()
     };
-    let result = convert_html(BLOG, "https://example.com/doc", &options);
+    let result = convert_html(BLOG, "https://example.com/doc", &options).expect("convert");
 
     assert!(!result.truncated);
     assert_eq!(result.next_offset, None);
     assert_eq!(result.offset, 0);
 }
 
-/// An offset past the end is a stale bookmark, not a crash: an empty last
-/// window that reports no continuation.
+/// An offset past the end is a stale bookmark, not a crash: it is refused with
+/// an error that names the size of the content.
 #[test]
-fn an_offset_past_the_end_terminates_instead_of_panicking() {
+fn an_offset_past_the_end_is_an_error_not_a_panic() {
     let options = FetchOptions {
         url: "https://example.com/doc".to_string(),
         content_type: ContentType::Text,
@@ -599,8 +609,17 @@ fn an_offset_past_the_end_terminates_instead_of_panicking() {
         offset: 10_000_000,
         ..Default::default()
     };
-    let result = convert_html(DOCS, "https://example.com/doc", &options);
-
-    assert_eq!(result.next_offset, None);
-    assert!(!result.truncated);
+    // Past the end is refused, rather than returning an empty window that a
+    // caller would read as the page having no text.
+    let err = convert_html(DOCS, "https://example.com/doc", &options).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            OptionsError::OffsetPastEnd {
+                offset: 10_000_000,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }

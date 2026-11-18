@@ -46,20 +46,24 @@ fn main() {
     };
 
     bench("fetch: html → text+refs", iters, || {
-        let _ = webfetch::convert_html(DOCS, "https://docs.example.com/page", &opts_text);
+        let _ = webfetch::convert_html(DOCS, "https://docs.example.com/page", &opts_text)
+            .expect("convert");
     });
     bench("fetch: html → markdown", iters, || {
-        let _ = webfetch::convert_html(DOCS, "https://docs.example.com/page", &opts_md);
+        let _ = webfetch::convert_html(DOCS, "https://docs.example.com/page", &opts_md)
+            .expect("convert");
     });
     bench("fetch: html → structured", iters, || {
-        let _ = webfetch::convert_html(DOCS, "https://docs.example.com/page", &opts_struct);
+        let _ = webfetch::convert_html(DOCS, "https://docs.example.com/page", &opts_struct)
+            .expect("convert");
     });
     bench("search: ddg-lite → results", iters, || {
         let _ = websearch::build_output_from_ddg("react 19", DDG, 10);
     });
 
     // Token-saver evidence: how much smaller is the reference-style output?
-    let result = webfetch::convert_html(DOCS, "https://docs.example.com/page", &opts_text);
+    let result =
+        webfetch::convert_html(DOCS, "https://docs.example.com/page", &opts_text).expect("convert");
     println!(
         "\nfetch sample: input {} B HTML → {} B content (~{} tokens), {} references preserved",
         DOCS.len(),
