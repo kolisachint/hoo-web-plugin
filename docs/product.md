@@ -417,7 +417,7 @@ The same libraries run inside hoocode as a WASI 0.2 component
 (`plugin/dev.hoocode/extension.wasm`), with no `webtools` binary on the path. The
 tools are `ext_webtools_fetch` and `ext_webtools_search`, with the MCP argument
 names and defaults. Requests go through hoocode's permission gate and its SSRF
-block, and search keys come from hoocode's settings (`searchProvider`,
+block, and search keys come from hoocode's settings under `pluginConfig.webtools` (`searchProvider`,
 `braveApiKey`, `tavilyApiKey`, `searxngUrl`). The component's build, tools and
 settings are in [`plugin/README.md`](../plugin/README.md).
 
@@ -592,9 +592,9 @@ crates/
         └── types.rs      Search output structs (SearchOutput, SearchStatus, …)
 ```
 
-Each leaf crate re-exports `webfetch_core::{compress, refs, http, tls}`, so the
-shared reference-style logic has a single home but stays reachable as
-`webfetch::refs` / `websearch::refs`.
+Each leaf crate re-exports `webfetch_core::{compress, refs, http}`, plus `tls`
+only with the `native` feature, so the shared reference-style logic has a single
+home but stays reachable as `webfetch::refs` / `websearch::refs`.
 
 ### Transports and features
 

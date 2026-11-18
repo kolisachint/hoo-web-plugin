@@ -64,8 +64,8 @@ import paths remain `webfetch` and `websearch`:
 
 ```toml
 [dependencies]
-webfetch = { package = "webtools-fetch", version = "0.2" }
-websearch = { package = "webtools-search", version = "0.2" }
+webfetch = { package = "webtools-fetch", version = "0.6" }
+websearch = { package = "webtools-search", version = "0.6" }
 ```
 
 Or pull straight from git:
@@ -127,8 +127,8 @@ enable `wasi`:
 
 ```toml
 [dependencies]
-webfetch = { package = "webtools-fetch", version = "0.2", default-features = false, features = ["wasi"] }
-websearch = { package = "webtools-search", version = "0.2", default-features = false, features = ["wasi"] }
+webfetch = { package = "webtools-fetch", version = "0.6", default-features = false, features = ["wasi"] }
+websearch = { package = "webtools-search", version = "0.6", default-features = false, features = ["wasi"] }
 ```
 
 The `wasi` build has no network policy of its own. Name the transport through
@@ -137,7 +137,7 @@ points, which take the transport as an argument:
 
 ```toml
 [dependencies]
-webfetch-core = { package = "webtools-core", version = "0.2", default-features = false, features = ["wasi"] }
+webfetch-core = { package = "webtools-core", version = "0.6", default-features = false, features = ["wasi"] }
 ```
 
 ```rust

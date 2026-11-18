@@ -27,6 +27,12 @@ lockstep semantic versioning across all crates.
   `--no-default-features --features wasi`; the tree then has no tokio, reqwest
   or rustls. The host enforces SSRF rules, DNS policy and TLS, since this path
   has no guard and no TLS configuration of its own.
+- **`Transport` seam for HTTP.** `webfetch_core::transport::Transport` sends one
+  hop (`HttpRequest` to `HttpResponse`, no redirects) and waits between retries.
+  `ReqwestTransport` is the native implementation and `WasiTransport` the
+  `wasi:http` one. Callers pass a transport to `webfetch::fetch_with`,
+  `websearch::run_search_with` and each provider's `search_with`; `fetch_page`
+  and `run_search` keep the native path.
 - **Retry backoff waits through the transport.** `Transport::sleep` is the
   wait between retries, so a host without a tokio runtime can drive the same
   retry loop. Tokio is an optional dependency behind `native` in each library
@@ -140,9 +146,15 @@ lockstep semantic versioning across all crates.
 
 ### Breaking
 
-- **`Transport` has a new required method, `sleep`.** Custom implementations
-  must add it (`ReqwestTransport` and `WasiTransport` already do). Test fakes
-  can make it a no-op.
+- **`webfetch_core::http` loses its reqwest helpers.** `read_body_capped`,
+  `read_body_capped_bytes` and `transient_send_error` are removed; the transport
+  reads the body and classifies the send error. `transient_status` takes the
+  status as a `u16` instead of `reqwest::StatusCode`.
+- **The reqwest-backed API needs the default `native` feature.**
+  `FetchOptions::tls`, `SearchOptions::tls`, `webfetch::tls`, `webfetch::guard`,
+  `websearch::tls` and `websearch::providers::ddg::fetch_lite` are compiled only
+  with `native`. Builds with `default-features = false` use `fetch_with`,
+  `run_search_with` and `WasiTransport` instead.
 
 - **Config file moved to `~/.config/webtools/config.json`.** `webtools` no
   longer reads `~/.hoocode/settings.json` and has no fallback to it. The file

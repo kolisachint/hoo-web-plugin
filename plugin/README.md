@@ -15,11 +15,14 @@ hoocode exposes them as `ext_webtools_fetch` and `ext_webtools_search`.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `fetch` | `url` (required); `output` (`text` \| `markdown` \| `structured`, default `text`); `max_tokens` (default 6000); `offset`; `outline`; `grep`; `timeout` (seconds, default 10); `json` | Compact: `{url, final_url, title?, content, truncated, next_offset?}`. `json: true`: the whole `FetchResult`. |
-| `search` | `query` (required); `max_results` (default 5); `safe_search` (`on` \| `off`); `timeout` (default 10); `json` | Compact: `{query, provider, result_count, content}`. `json: true`: the whole `SearchOutput`. |
+| `fetch` | `url` (required); `output` (`text` \| `markdown` \| `structured`, default `text`); `max_tokens` (default 6000); `offset`; `outline`; `grep`; `timeout` (seconds, default 10, capped at 8); `json` | Compact: `{url, final_url, title?, content, truncated, next_offset?}`. `json: true`: the whole `FetchResult`. |
+| `search` | `query` (required); `max_results` (default 5); `safe_search` (`on` \| `off`); `timeout` (seconds, default 10, capped at 6); `json` | Compact: `{query, provider, result_count, content}`. `json: true`: the whole `SearchOutput`. |
 
 Argument names and defaults match the webtools MCP server (`src/mcp.rs`). Invalid
-arguments return `invalid-args`. A page with no extractable text, or a blocked
+arguments return `invalid-args`. hoocode traps a tool call at 30 seconds, so the
+component runs each call under a 25-second budget: the whole fetch (redirects and
+retries included) or the whole search (fallback provider included) stops at that
+point. A fallback is tried only if at least 8 seconds of budget remain. A page with no extractable text, or a blocked
 search, returns a failure with the reason in the message.
 
 The skill `skills/web` tells the model when to use each tool and how to keep
@@ -27,8 +30,13 @@ budgets small.
 
 ## Settings
 
-The host reads these through `config-get` from the user's hoocode settings. The
-plugin ships no settings of its own.
+The host reads these through `config-get` from hoocode's settings, under
+`pluginConfig.webtools.<key>`. The plugin ships no settings of its own. For
+example, in hoocode's settings file:
+
+```json
+{"pluginConfig": {"webtools": {"searchProvider": "brave", "braveApiKey": "..."}}}
+```
 
 | Key | Meaning | Default |
 |---|---|---|
@@ -72,6 +80,11 @@ byte-reproducible from any checkout path and any target directory:
 - Paths in the output are remapped: the staging tree, the target directory, the
   cargo home and the rustup sysroot.
 - The build uses `--locked`.
+- The staging path is shared by every user of the host, so the script takes an
+  `flock` on `/tmp/webtools-plugin-src.lock` where `flock` exists, creates the
+  stage with `mkdir` (no `-p`) so it fails rather than reusing a directory, and
+  checks that the stage is owned by you and not group- or world-writable. Without
+  `flock`, concurrent builds on one host are unsupported.
 
 The output depends on the rustc version. CI pins `1.97.0`, so rebuild with that
 version: `rustup toolchain install 1.97.0 -t wasm32-wasip2` and

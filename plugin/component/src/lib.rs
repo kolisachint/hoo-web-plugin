@@ -8,14 +8,17 @@
 use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use webfetch::types::{ContentStatus, ContentType, FetchOptions, FetchResult};
-use webfetch_core::transport::WasiTransport;
+use webfetch_core::transport::{
+    HttpRequest, HttpResponse, Transport, TransportError, WasiTransport,
+};
 use websearch::providers::Provider;
-use websearch::types::SearchOptions;
+use websearch::types::{SearchOptions, SearchOutput};
 
 wit_bindgen::generate!({
     path: "wit",
@@ -27,6 +30,16 @@ use hoocode::extension::types::{ToolError, ToolInfo};
 
 /// Output cap for `fetch` when the caller gives none. Same as the MCP server.
 const DEFAULT_MAX_TOKENS: usize = 6_000;
+
+/// Longest a whole tool call may run. hoocode traps a call at 30 s; the margin
+/// covers conversion and rendering after the last request.
+const CALL_BUDGET: Duration = Duration::from_secs(25);
+/// Per-request timeout caps, in seconds. With [`CALL_BUDGET`] they keep a fetch
+/// (3 x timeout) and a search (3 attempts x 2 hops x timeout) inside the budget.
+const FETCH_TIMEOUT_CAP_SECS: u64 = 8;
+const SEARCH_TIMEOUT_CAP_SECS: u64 = 6;
+/// The fallback provider is tried only when at least this much budget is left.
+const FALLBACK_MIN_REMAINING: Duration = Duration::from_secs(8);
 
 struct Webtools;
 
@@ -124,7 +137,7 @@ fn fetch_schema() -> Value {
                 "type": "string",
                 "description": "Return where the page matches this regular expression — offset, surrounding text, and the section it falls in — instead of the body. Case-insensitive unless the pattern carries an uppercase letter."
             },
-            "timeout": { "type": "integer", "minimum": 1, "description": "Request timeout in seconds (default 10)" },
+            "timeout": { "type": "integer", "minimum": 1, "description": "Request timeout in seconds (default 10, capped at 8). The whole fetch, redirects and retries included, is limited to 25 s." },
             "json": {
                 "type": "boolean",
                 "description": "Return the full FetchResult as JSON instead of the compact form (default false)"
@@ -141,7 +154,7 @@ fn search_schema() -> Value {
             "query": { "type": "string", "description": "Search query" },
             "max_results": { "type": "integer", "minimum": 1, "description": "Max results (default 5)" },
             "safe_search": { "type": "string", "enum": ["on", "off"], "description": "Safe search toggle" },
-            "timeout": { "type": "integer", "minimum": 1, "description": "Request timeout in seconds (default 10)" },
+            "timeout": { "type": "integer", "minimum": 1, "description": "Request timeout in seconds (default 10, capped at 6). The whole search, fallback provider included, is limited to 25 s." },
             "json": {
                 "type": "boolean",
                 "description": "Return the full SearchOutput as JSON instead of the compact form (default false)"
@@ -164,7 +177,7 @@ fn run_fetch(args: FetchArgs) -> Result<Value, ToolError> {
             )))
         }
     };
-    let timeout_secs = args.timeout.unwrap_or(10);
+    let timeout_secs = args.timeout.unwrap_or(10).clamp(1, FETCH_TIMEOUT_CAP_SECS);
     let options = FetchOptions {
         url: args.url.clone(),
         content_type,
@@ -176,12 +189,9 @@ fn run_fetch(args: FetchArgs) -> Result<Value, ToolError> {
     };
 
     host::log(LogLevel::Debug, "fetch: requesting");
-    let page = block_on(webfetch::fetch_with(
-        &WasiTransport::new(),
-        &args.url,
-        timeout_secs,
-    ))
-    .map_err(|e| ToolError::Failed(format!("{e:#}")))?;
+    let budget = Budget::new();
+    let page = block_on(webfetch::fetch_with(&budget, &args.url, timeout_secs))
+        .map_err(|e| ToolError::Failed(format!("{e:#}")))?;
     let result = webfetch::convert_page(page, &options);
 
     if result.status.is_failure() {
@@ -234,18 +244,39 @@ fn run_search(args: SearchArgs) -> Result<Value, ToolError> {
     let provider = configured_provider("searchProvider").map_err(ToolError::Failed)?;
     let fallback = configured_fallback(&provider);
 
-    let options = SearchOptions {
-        query: args.query,
-        max_results: Some(args.max_results.unwrap_or(5)),
+    let timeout_secs = args.timeout.unwrap_or(10).clamp(1, SEARCH_TIMEOUT_CAP_SECS);
+    let max_results = Some(args.max_results.unwrap_or(5));
+    let query = args.query;
+    let options = |provider: Provider| SearchOptions {
+        query: query.clone(),
+        max_results,
         safe_search,
-        timeout_secs: args.timeout.unwrap_or(10),
+        timeout_secs,
         provider,
-        fallback,
+        ..Default::default()
     };
 
+    // The library's own sequence (`run_search_with`), unrolled so the fallback
+    // can be skipped when the budget is nearly spent.
     host::log(LogLevel::Debug, "search: querying");
-    let output = block_on(websearch::run_search_with(&WasiTransport::new(), options))
-        .map_err(|e| ToolError::Failed(format!("{e:#}")))?;
+    let budget = Budget::new();
+    let mut result = block_on(websearch::run_search_with(&budget, options(provider)));
+    if !answered(&result) {
+        match fallback {
+            Some(fb) if budget.remaining() >= FALLBACK_MIN_REMAINING => {
+                let second = block_on(websearch::run_search_with(&budget, options(fb)));
+                if answered(&second) {
+                    result = second;
+                }
+            }
+            Some(_) => host::log(
+                LogLevel::Warn,
+                "search: too little budget left for the fallback provider",
+            ),
+            None => {}
+        }
+    }
+    let output = result.map_err(|e| ToolError::Failed(format!("{e:#}")))?;
 
     let rendered = websearch::render_output(&output);
     if output.status.is_failure() {
@@ -260,6 +291,47 @@ fn run_search(args: SearchArgs) -> Result<Value, ToolError> {
         "result_count": output.result_count,
         "content": rendered,
     }))
+}
+
+/// True when a provider gave an answer: no error and no blocked or empty status.
+fn answered<E>(result: &Result<SearchOutput, E>) -> bool {
+    matches!(result, Ok(out) if !out.status.is_failure())
+}
+
+/// The WASI transport under one deadline for the whole tool call. Each request
+/// gets the time left, and once the deadline has passed requests fail at once
+/// and backoff sleeps are cut short, so no retry or fallback runs past the budget.
+struct Budget {
+    inner: WasiTransport,
+    deadline: Instant,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self {
+            inner: WasiTransport::new(),
+            deadline: Instant::now() + CALL_BUDGET,
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
+impl Transport for Budget {
+    async fn send(&self, mut req: HttpRequest) -> Result<HttpResponse, TransportError> {
+        let left = self.remaining();
+        if left.is_zero() {
+            return Err(TransportError::Timeout(req.url.clone()));
+        }
+        req.timeout = Some(req.timeout.map_or(left, |t| t.min(left)));
+        self.inner.send(req).await
+    }
+
+    async fn sleep(&self, d: Duration) {
+        self.inner.sleep(d.min(self.remaining())).await;
+    }
 }
 
 /// A non-empty setting from the host, or `None`.

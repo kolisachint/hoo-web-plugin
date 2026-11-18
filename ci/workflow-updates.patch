@@ -1,8 +1,8 @@
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index 1b42220..0d25818 100644
+index 1b42220..783b12e 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
-@@ -20,6 +20,83 @@ jobs:
+@@ -20,6 +20,86 @@ jobs:
        - name: Format
          run: cargo fmt --all --check
        - name: Clippy
@@ -71,6 +71,9 @@ index 1b42220..0d25818 100644
 +  plugin:
 +    name: plugin component
 +    runs-on: ubuntu-latest
++    env:
++      # build.sh builds here, so the cache below must cover this directory.
++      WEBTOOLS_TARGET_DIR: ${{ runner.temp }}/webtools-plugin-target
 +    steps:
 +      - uses: actions/checkout@v4
 +      - uses: dtolnay/rust-toolchain@1.97.0
@@ -78,7 +81,7 @@ index 1b42220..0d25818 100644
 +        run: rustup target add wasm32-wasip2
 +      - uses: Swatinem/rust-cache@v2
 +        with:
-+          workspaces: plugin/component
++          workspaces: plugin/component -> ${{ runner.temp }}/webtools-plugin-target
 +      - name: Build the component
 +        run: plugin/build.sh
 +      - name: Upload the component

@@ -21,12 +21,32 @@ cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 sysroot="$(rustc --print sysroot)"
 # Fixed on purpose: the metadata hash depends on it. Do not make it configurable.
 stage="/tmp/webtools-plugin-src"
+lock="$stage.lock"
 case "$target_dir" in
     "$root"|"$root"/*) echo "build.sh: target dir must be outside $root" >&2; exit 1 ;;
 esac
 
+# /tmp is shared on some hosts. Serialise builds with a lock where flock exists;
+# without it, concurrent builds on one host are unsupported.
+if command -v flock >/dev/null 2>&1; then
+    if [ -L "$lock" ]; then echo "build.sh: $lock is a symlink" >&2; exit 1; fi
+    exec 9>"$lock"
+    flock 9
+else
+    echo "build.sh: flock not found; concurrent builds on this host are unsupported" >&2
+fi
+
 rm -rf "$stage"
-mkdir -p "$stage"
+# No -p: mkdir fails if something appeared at the stage path since the rm above,
+# rather than building into a directory someone else controls.
+mkdir "$stage"
+trap 'rm -rf "$stage"' EXIT
+chmod 700 "$stage"
+if [ -z "$(find "$stage" -maxdepth 0 -user "$(id -u)" -print)" ] \
+    || [ -n "$(find "$stage" -maxdepth 0 -perm -022 -print)" ]; then
+    echo "build.sh: $stage is not owned by you or is group/world-writable" >&2
+    exit 1
+fi
 tar -C "$root" --exclude=.git --exclude=target --exclude='target-*' \
     --exclude=component/target -cf - . | tar -C "$stage" -xf -
 
