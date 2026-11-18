@@ -709,6 +709,63 @@ mod tests {
         assert!(r.references.is_empty(), "refs: {:?}", r.references);
     }
 
+    /// No budget, but an offset: the link before the window is not in the text
+    /// the caller gets, so its URL must not be listed.
+    #[test]
+    fn an_unbudgeted_window_does_not_list_a_link_before_the_offset() {
+        let html = r#"<html><body><article>
+            <p>Read <a href="https://example.com/before">the early link</a> first.</p>
+            <p>Then the rest of the page goes on, with <a href="https://example.com/after">the later link</a>.</p>
+            </article></body></html>"#;
+        let whole = convert_html(html, "https://x.test/", &FetchOptions::default()).unwrap();
+        let start = whole.content.find("Then the").expect("second paragraph");
+        let options = FetchOptions {
+            offset: start,
+            ..FetchOptions::default()
+        };
+        let r = convert_html(html, "https://x.test/", &options).unwrap();
+        assert!(r.content.contains("later link [2]"), "{}", r.content);
+        assert!(!r.content.contains("early link"), "{}", r.content);
+        let urls: Vec<_> = r.references.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://example.com/after"]);
+    }
+
+    /// A link nested in a link (here through a table) must not leak the
+    /// converter's delimiters into the text, the markdown, or a reference's text.
+    #[test]
+    fn nested_anchors_leak_no_control_characters() {
+        let html = r#"<html><body><article><p>Go <a href="https://x.test/a"><table><tr><td><a href="https://x.test/b">inner</a></td></tr></table>outer</a> now.</p></article></body></html>"#;
+        let clean = |s: &str| s.chars().all(|c| c >= ' ' || c == '\n' || c == '\t');
+        for content_type in [
+            ContentType::Text,
+            ContentType::Markdown,
+            ContentType::Structured,
+        ] {
+            let options = FetchOptions {
+                content_type,
+                ..FetchOptions::default()
+            };
+            let r = convert_html(html, "https://x.test/", &options).unwrap();
+            assert!(clean(&r.content), "{content_type:?}: {:?}", r.content);
+            assert!(
+                r.content.contains("inner"),
+                "{content_type:?}: {}",
+                r.content
+            );
+            assert!(
+                r.content.contains("outer"),
+                "{content_type:?}: {}",
+                r.content
+            );
+            // The inner link is not a second link: only the outer one is listed.
+            let urls: Vec<_> = r.references.iter().map(|r| r.url.as_str()).collect();
+            assert_eq!(urls, vec!["https://x.test/a"], "{content_type:?}");
+            for reference in &r.references {
+                assert!(clean(&reference.text), "{:?}", reference);
+            }
+        }
+    }
+
     #[test]
     fn structured_budget_lists_only_references_in_kept_blocks() {
         let filler = "lorem ipsum dolor sit amet ".repeat(300);

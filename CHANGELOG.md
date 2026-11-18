@@ -162,6 +162,20 @@ lockstep semantic versioning across all crates.
 - **`convert_body`, `convert_html` and `convert_page` return
   `Result<FetchResult, OptionsError>`**, so invalid options are reported
   instead of embedded in the content.
+- **`webfetch_core::refs::cited_indices` is removed.** It scanned text for
+  `[N]`, which read page text as markers. Use the `Citation`s the converter
+  records instead, with `refs::cited_within` or `refs::rebase`.
+- **`refs::fit_to_budget` takes a `citations: &[Citation]` parameter** after
+  `body`: the markers emitted into `body`, with offsets relative to it. Callers
+  that passed only the body must record the markers and pass them in.
+- **`convert::Converted` has a new public field `citations`** (`Vec<Citation>`).
+  Exhaustive struct literals need it.
+- **`media::classify` may return `Other` for a declared text type** whose body
+  looks binary (C0 control bytes in the first 8 KiB). Such a body is no longer
+  rendered as text, whatever its `Content-Type`.
+- **`websearch::run_search_with` errors on an empty query.** An empty or
+  whitespace-only query fails with `OptionsError::EmptyQuery` before any request
+  is made; it used to be sent to the provider.
 - **`webfetch_core::http` loses its reqwest helpers.** `read_body_capped`,
   `read_body_capped_bytes` and `transient_send_error` are removed; the transport
   reads the body and classifies the send error. `transient_status` takes the

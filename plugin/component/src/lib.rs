@@ -44,6 +44,11 @@ const SEARCH_TIMEOUT_CAP_SECS: u64 = 12;
 /// and the primary never runs past `CALL_BUDGET - FALLBACK_MIN_REMAINING` when
 /// a fallback is configured (see [`primary_limit`]).
 const FALLBACK_MIN_REMAINING: Duration = Duration::from_secs(8);
+/// Slack past the primary's limit. A primary that hits its deadline returns a
+/// little after it, so without this the fallback would see just under
+/// [`FALLBACK_MIN_REMAINING`] left and be skipped exactly when the primary
+/// used its whole allowance.
+const PRIMARY_SLACK: Duration = Duration::from_secs(1);
 
 struct Webtools;
 
@@ -274,9 +279,9 @@ fn run_search(args: SearchArgs) -> Result<Value, ToolError> {
     ));
     if !answered(&result) {
         if let Some(fb) = fallback {
-            let left = CALL_BUDGET.saturating_sub(started.elapsed());
-            if left >= FALLBACK_MIN_REMAINING {
-                let fallback_budget = Budget::new(left);
+            let elapsed = started.elapsed();
+            if fallback_allowed(elapsed) {
+                let fallback_budget = Budget::new(CALL_BUDGET.saturating_sub(elapsed));
                 let second = block_on(websearch::run_search_with(&fallback_budget, options(fb)));
                 if answered(&second) {
                     result = second;
@@ -334,14 +339,20 @@ fn search_options(args: &SearchArgs) -> Result<SearchOptions, ToolError> {
 }
 
 /// How long the primary search may run. With a fallback configured, the last
-/// [`FALLBACK_MIN_REMAINING`] of the call is kept for it. Without one, the
-/// primary may use the whole call.
+/// [`FALLBACK_MIN_REMAINING`] of the call, less [`PRIMARY_SLACK`], is kept for
+/// it. Without one, the primary may use the whole call.
 fn primary_limit(has_fallback: bool) -> Duration {
     if has_fallback {
-        CALL_BUDGET.saturating_sub(FALLBACK_MIN_REMAINING)
+        CALL_BUDGET.saturating_sub(FALLBACK_MIN_REMAINING + PRIMARY_SLACK)
     } else {
         CALL_BUDGET
     }
+}
+
+/// Whether the fallback still gets its minimum once `elapsed` has passed since
+/// the call started.
+fn fallback_allowed(elapsed: Duration) -> bool {
+    CALL_BUDGET.saturating_sub(elapsed) >= FALLBACK_MIN_REMAINING
 }
 
 /// True when a provider gave an answer: no error and no blocked or empty status.
@@ -560,12 +571,23 @@ mod tests {
     #[test]
     fn the_primary_leaves_the_fallback_its_reserve() {
         assert_eq!(
-            primary_limit(true) + FALLBACK_MIN_REMAINING,
+            primary_limit(true) + FALLBACK_MIN_REMAINING + PRIMARY_SLACK,
             CALL_BUDGET,
-            "primary and fallback reserve must add up to the call budget"
+            "primary, slack and fallback reserve must add up to the call budget"
         );
         assert!(primary_limit(true) >= Duration::from_secs(SEARCH_TIMEOUT_CAP_SECS));
         assert_eq!(primary_limit(false), CALL_BUDGET);
+    }
+
+    /// A primary that uses its whole limit and overshoots it a little (its
+    /// deadline is checked between requests) must still leave the fallback
+    /// its minimum. Before the slack, this exact case skipped the fallback.
+    #[test]
+    fn a_primary_that_overshoots_its_limit_still_leaves_the_fallback_time() {
+        let overshoot = Duration::from_millis(300);
+        assert!(fallback_allowed(primary_limit(true)));
+        assert!(fallback_allowed(primary_limit(true) + overshoot));
+        assert!(!fallback_allowed(CALL_BUDGET - FALLBACK_MIN_REMAINING + overshoot));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use scraper::node::Node;
 use scraper::{ElementRef, Html};
 use url::Url;
 
-use super::{push_citation, push_literal, resolve_citations};
+use super::{plain, push_citation, push_literal, resolve_citations};
 use crate::extract;
 use crate::types::UrlReference;
 
@@ -24,6 +24,9 @@ pub(crate) struct RefCollector {
     seen: HashMap<String, usize>,
     pub(crate) references: Vec<UrlReference>,
     base: Option<Url>,
+    /// How many anchors the walk is inside. A link nested in a link is not a
+    /// second link, so only the outermost anchor earns a marker.
+    pub(crate) anchor_depth: usize,
 }
 
 impl RefCollector {
@@ -32,6 +35,7 @@ impl RefCollector {
             seen: HashMap::new(),
             references: Vec::new(),
             base: Url::parse(base_url).ok(),
+            anchor_depth: 0,
         }
     }
 
@@ -121,12 +125,21 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
             }
 
             if name == "a" {
+                if refs.anchor_depth > 0 {
+                    // Nested in a link: its text reads as part of the outer one.
+                    for child in node.children() {
+                        walk(child, out, refs);
+                    }
+                    return;
+                }
                 // Collect the anchor's inner text first.
+                refs.anchor_depth += 1;
                 let mut inner = String::new();
                 for child in node.children() {
                     walk(child, &mut inner, refs);
                 }
-                let inner = inner.trim().to_string();
+                refs.anchor_depth -= 1;
+                let inner = plain(&inner).trim().to_string();
                 out.push_str(&inner);
                 if let Some(href) = el.attr("href") {
                     if let Some(resolved) = refs.resolve(href) {

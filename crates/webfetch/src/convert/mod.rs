@@ -54,6 +54,16 @@ pub(crate) fn push_citation(out: &mut String, index: usize, visible: &str) {
     out.push(CITE_CLOSE);
 }
 
+/// The visible text of a walker fragment, with every marker's delimiters
+/// removed and its visible text kept.
+///
+/// A link's anchor text can hold markers of links nested inside it. Those
+/// delimiters must not reach a reference's text or an enclosing marker's visible
+/// span, so the anchor text is passed through here first.
+pub(crate) fn plain(working: &str) -> String {
+    resolve_citations(working).0
+}
+
 /// Turn a walker's working text into the output text plus the markers in it.
 ///
 /// Delimiters are removed; each marker's visible text is kept in place and its
@@ -104,6 +114,9 @@ pub(crate) fn resolve_citations(working: &str) -> (String, Vec<Citation>) {
                     });
                     State::Text
                 }
+                // A stray open delimiter inside visible text is dropped, not
+                // copied: the walkers never write one there (see [`plain`]).
+                CITE_OPEN => State::Visible { start, index },
                 _ => {
                     text.push(c);
                     State::Visible { start, index }
@@ -184,6 +197,31 @@ mod tests {
                 start: 4,
                 end: 7,
                 index: 3
+            }]
+        );
+    }
+
+    /// A stray open delimiter inside a marker's visible text is dropped, so the
+    /// span still ends at its own close and the text carries no control bytes.
+    #[test]
+    fn a_stray_open_delimiter_in_visible_text_is_dropped() {
+        let mut working = String::new();
+        working.push(CITE_OPEN);
+        working.push('1');
+        working.push(CITE_OPEN);
+        working.push('a');
+        working.push(CITE_OPEN);
+        working.push('b');
+        working.push(CITE_CLOSE);
+        working.push_str(" tail");
+        let (text, citations) = resolve_citations(&working);
+        assert_eq!(text, "ab tail");
+        assert_eq!(
+            citations,
+            vec![Citation {
+                start: 0,
+                end: 2,
+                index: 1
             }]
         );
     }

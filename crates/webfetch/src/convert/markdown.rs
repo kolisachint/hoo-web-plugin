@@ -12,7 +12,7 @@ use scraper::node::Node;
 use scraper::Html;
 
 use super::text::RefCollector;
-use super::{push_citation, push_literal, resolve_citations};
+use super::{plain, push_citation, push_literal, resolve_citations};
 use crate::extract;
 use crate::types::UrlReference;
 
@@ -43,11 +43,20 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
             }
 
             if name == "a" {
+                if refs.anchor_depth > 0 {
+                    // Nested in a link: its text reads as part of the outer one.
+                    for child in node.children() {
+                        walk(child, out, refs);
+                    }
+                    return;
+                }
+                refs.anchor_depth += 1;
                 let mut inner = String::new();
                 for child in node.children() {
                     walk(child, &mut inner, refs);
                 }
-                let inner = inner.trim().to_string();
+                refs.anchor_depth -= 1;
+                let inner = plain(&inner).trim().to_string();
                 match el.attr("href").and_then(|href| refs.resolve(href)) {
                     Some(url) => {
                         let idx = refs.index_for(url.clone(), &inner);

@@ -66,17 +66,21 @@ fn classify_declared(content_type: Option<&str>, body: &str) -> Media {
 }
 
 /// Does a decoded body look like binary data rather than text? Among the first
-/// 8 KiB characters, more than one in ten being a control character (other than
-/// the whitespace and escape text uses) or a U+FFFD replacement counts as binary.
-/// Text does not look like that; compressed or raw bytes decoded as UTF-8 do.
+/// 8 KiB characters, more than one in ten being a C0 control character (other
+/// than the whitespace and escape text uses) counts as binary.
+///
+/// U+FFFD does not count. A legacy-charset page with no charset label is
+/// decoded lossily as UTF-8 and comes out full of replacement characters, and
+/// it is still text. Compressed or raw bytes always carry NUL and other C0
+/// bytes, so the control-character count is enough to catch them.
 pub fn looks_binary(body: &str) -> bool {
     const SAMPLE: usize = 8 * 1024;
     let mut sampled = 0usize;
     let mut odd = 0usize;
     for c in body.chars().take(SAMPLE) {
         sampled += 1;
-        let control = c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\u{0C}' | '\u{1B}');
-        if control || c == '\u{FFFD}' {
+        let control = c < ' ' && !matches!(c, '\t' | '\n' | '\r' | '\u{0C}' | '\u{1B}');
+        if control {
             odd += 1;
         }
     }
@@ -138,5 +142,34 @@ mod tests {
         let mut text = "word ".repeat(400);
         text.push('\u{FFFD}');
         assert!(!looks_binary(&text));
+    }
+
+    /// Windows-1251 Cyrillic with no charset label, as raw bytes. Decoding it
+    /// as UTF-8 yields a replacement character per high byte, which is a lot
+    /// of U+FFFD, but the page is still text and must render.
+    #[test]
+    fn unlabelled_windows_1251_html_is_not_binary() {
+        // "Privet, mir! Eto testovaya stranitsa." in windows-1251, as raw bytes.
+        let line: &[u8] = b"<p>\xcf\xf0\xe8\xe2\xe5\xf2, \xec\xe8\xf0! \xdd\xf2\xee \xf2\xe5\xf1\xf2\xee\xe2\xe0\xff \xf1\xf2\xf0\xe0\xed\xe8\xf6\xe0.</p>";
+        let mut bytes = b"<html><body>".to_vec();
+        for _ in 0..5 {
+            bytes.extend_from_slice(line);
+        }
+        bytes.extend_from_slice(b"</body></html>");
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(body.matches('\u{FFFD}').count() > body.len() / 10);
+        assert!(!looks_binary(&body));
+        assert_eq!(classify(Some("text/html"), &body), Media::Html);
+        assert_eq!(classify(None, &body), Media::Html);
+    }
+
+    /// A gzip body declared as JSON is binary, not a document to print.
+    #[test]
+    fn gzip_body_declared_json_is_binary() {
+        let body = raw_gzip_as_text();
+        assert_eq!(
+            classify(Some("application/json"), &body),
+            Media::Other("application/json".into())
+        );
     }
 }

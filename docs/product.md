@@ -257,11 +257,12 @@ A blocked search exits non-zero and is marked `isError` over MCP. Anything less
 and a rate-limited search looks exactly like a subject the web has nothing on —
 which is how an agent ends up confidently reporting that nothing exists.
 
-Bad arguments are refused before any request is made, and are errors rather
-than results: a `--max-tokens` of 0, a `--grep` pattern that does not compile,
-an `--offset` past the end of the content, and an empty search query. The
-message names the argument and the reason. In the plugin these are reported as
-`invalid-args`.
+Bad arguments are errors rather than results. A `--max-tokens` of 0, a `--grep`
+pattern that does not compile, and an empty search query are refused before any
+request is made. An `--offset` past the end of the content can only be checked
+once the page is converted, so it is refused after the fetch, before any content
+is returned. The message names the argument and the reason. In the plugin these
+are reported as `invalid-args`.
 
 ### Offline / piped input
 

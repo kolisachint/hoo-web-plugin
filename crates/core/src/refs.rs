@@ -150,19 +150,24 @@ pub struct Fitted {
 /// costs nothing and is usually enough on its own; if the block still does not
 /// fit, references are dropped from the tail so the cap holds.
 ///
-/// With `max_tokens == None` nothing is truncated and every reference is kept.
+/// With `max_tokens == None` nothing is truncated, but the block still lists
+/// only the references the body cites: a window that starts past a link must
+/// not name that link.
 pub fn fit_to_budget<T: Referable>(
     body: &str,
     citations: &[Citation],
     references: &[T],
     max_tokens: Option<usize>,
 ) -> Fitted {
-    let all = || references.iter().map(Referable::index).collect::<Vec<_>>();
-
     let Some(max_tokens) = max_tokens else {
+        let cited = cited_within(citations, body.len());
+        let kept: Vec<&T> = references
+            .iter()
+            .filter(|r| cited.contains(&r.index()))
+            .collect();
         return Fitted {
-            content: assemble(body, &render_block(references)),
-            kept: all(),
+            content: assemble(body, &render_block(&kept)),
+            kept: kept.iter().map(|r| r.index()).collect(),
             body_consumed: body.len(),
         };
     };
@@ -344,6 +349,31 @@ mod tests {
         assert_eq!(kept, vec![1, 2, 3]);
         assert!(content.contains("References:"));
         assert!(content.contains("[3] https://example.com"));
+    }
+
+    /// With no budget the body is whole, so every cited reference is kept, and
+    /// a reference no marker cites (its link sat in stripped text) is not.
+    #[test]
+    fn no_budget_lists_only_cited_references() {
+        let (body, citations) = body_citing(3);
+        let refs = refs(4);
+        let Fitted { content, kept, .. } = fit_to_budget(&body, &citations, &refs, None);
+        assert_eq!(kept, vec![1, 2, 3]);
+        assert!(content.contains("[3] https://example.com"));
+        assert!(!content.contains("[4] https://example.com"), "{content}");
+    }
+
+    /// A window that starts after a marker must not list that marker's
+    /// reference: the caller's `rebase` drops the marker, so nothing cites it.
+    #[test]
+    fn no_budget_window_drops_references_cited_before_it() {
+        let (body, citations) = body_citing(3);
+        let start = body.find("Item 2").unwrap();
+        let window = &body[start..];
+        let citations = rebase(&citations, start);
+        let Fitted { content, kept, .. } = fit_to_budget(window, &citations, &refs(3), None);
+        assert_eq!(kept, vec![2, 3]);
+        assert!(!content.contains("[1] https://example.com"), "{content}");
     }
 
     /// The regression this function exists for: a link-dense page must not

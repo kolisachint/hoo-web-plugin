@@ -201,13 +201,7 @@ fn send_blocking(req: HttpRequest) -> Result<HttpResponse, TransportError> {
     // kept only for the message, so they get the smaller cap.
     let body = match status {
         300..=399 => Vec::new(),
-        400..=599 => read_body(
-            &incoming,
-            &req.url,
-            deadline,
-            ERROR_BODY_CAP,
-            body_coding(coding, &req.url)?,
-        )?,
+        400..=599 => error_body(&incoming, &req.url, deadline, coding),
         _ => read_body(
             &incoming,
             &req.url,
@@ -273,6 +267,21 @@ fn body_coding(coding: Result<Coding, String>, target: &str) -> Result<Coding, T
     coding.map_err(|c| {
         TransportError::Other(format!("unsupported Content-Encoding `{c}` from {target}"))
     })
+}
+
+/// The body of an error status, kept for the message. A body that cannot be
+/// read or decoded is dropped rather than failing the exchange: the status is
+/// what the caller classifies and retries on, and the body only adds detail.
+fn error_body(
+    body: &IncomingBody,
+    target: &str,
+    deadline: Option<u64>,
+    coding: Result<Coding, String>,
+) -> Vec<u8> {
+    match body_coding(coding, target) {
+        Ok(coding) => read_body(body, target, deadline, ERROR_BODY_CAP, coding).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// A blocking `Read` over a response body. Each chunk waits against the request

@@ -7,7 +7,7 @@
 
 use std::io::{self, Read};
 
-use flate2::read::{GzDecoder, ZlibDecoder};
+use flate2::read::{MultiGzDecoder, ZlibDecoder};
 
 /// `Accept-Encoding` for requests that set none: the codings [`read_capped`]
 /// decodes that are worth asking for. Deflate is still decoded when a server
@@ -79,7 +79,9 @@ pub fn read_capped<R: Read>(src: R, coding: Coding, cap: usize) -> io::Result<Ve
     let limit = cap as u64;
     let result = match coding {
         Coding::Identity => (&mut counted).take(limit).read_to_end(&mut out),
-        Coding::Gzip => GzDecoder::new(&mut counted)
+        // Multi-member: a gzip body may be several members concatenated, and
+        // a single-member decoder would stop after the first and drop the rest.
+        Coding::Gzip => MultiGzDecoder::new(&mut counted)
             .take(limit)
             .read_to_end(&mut out),
         Coding::Deflate => ZlibDecoder::new(&mut counted)
@@ -137,6 +139,14 @@ mod tests {
         let body = br#"{"gzipped":true,"method":"GET"}"#;
         let out = read_capped(&gzip(body)[..], Coding::Gzip, 1024).unwrap();
         assert_eq!(out, body);
+    }
+
+    #[test]
+    fn concatenated_gzip_members_are_all_decoded() {
+        let mut packed = gzip(b"first, ");
+        packed.extend(gzip(b"second"));
+        let out = read_capped(&packed[..], Coding::Gzip, 1024).unwrap();
+        assert_eq!(out, b"first, second");
     }
 
     #[test]

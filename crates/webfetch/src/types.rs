@@ -192,8 +192,9 @@ pub struct FetchOptions {
     /// Byte offset into the extracted body to start from, for reading a long
     /// document one window at a time. A non-zero offset at or past the end of
     /// the body is an [`OptionsError::OffsetPastEnd`]. Otherwise it is snapped
-    /// back to a character boundary. Ignored by structured output, which is
-    /// addressed by blocks rather than bytes.
+    /// back to a character boundary. Ignored, and not checked, with `outline`
+    /// or `grep`, which report on the whole body; and by structured output,
+    /// which is addressed by blocks rather than bytes.
     #[serde(default)]
     pub offset: usize,
     /// Return the document's outline — its headings, and the offset that reads
