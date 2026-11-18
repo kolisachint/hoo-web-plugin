@@ -607,7 +607,10 @@ crates and the core share:
   store, the SSRF guard with DNS pinning, and tokio for the retry timer.
   `fetch_page`, `fetch_and_convert`, `run_search` and `Provider::search` use it.
 - `wasi`: `WasiTransport`, which sends through `wasi:http/outgoing-handler` from
-  a `wasm32-wasip2` component. It pulls in no tokio, reqwest or rustls.
+  a `wasm32-wasip2` component. It pulls in no tokio, reqwest or rustls. It sends
+  `Accept-Encoding: gzip, br` unless the caller sets one, and decodes gzip,
+  deflate and brotli bodies itself (the 5 MiB cap counts decoded bytes). A body
+  under any other `Content-Encoding` is an error, not returned raw.
 
 The two may both be on, and the native entry points keep working.
 The generic entry points take any transport: `webfetch::fetch_with(&transport,

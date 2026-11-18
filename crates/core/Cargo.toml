@@ -28,9 +28,14 @@ serde = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
 encoding_rs = { workspace = true }
+flate2 = { workspace = true }
+brotli-decompressor = { workspace = true }
 anyhow = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 wasip2 = { version = "1.0.1", optional = true }
+
+[dev-dependencies]
+brotli = "8"

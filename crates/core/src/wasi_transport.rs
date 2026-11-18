@@ -12,6 +12,7 @@
 //! timer, so one `timeout` bounds the whole request: the connect, the headers
 //! and the body together.
 
+use std::io::{self, Read};
 use std::time::Duration;
 
 use url::Url;
@@ -24,7 +25,8 @@ use wasip2::http::types::{
 use wasip2::io::poll::{self, Pollable};
 use wasip2::io::streams::{InputStream, OutputStream, StreamError};
 
-use crate::http::{push_capped, ERROR_BODY_CAP, MAX_BODY_BYTES, USER_AGENT};
+use crate::content_encoding::{self, Coding};
+use crate::http::{ERROR_BODY_CAP, MAX_BODY_BYTES, USER_AGENT};
 use crate::transport::{HttpRequest, HttpResponse, Method, Transport, TransportError};
 
 /// Most bytes one `read` call asks for.
@@ -119,6 +121,16 @@ fn send_blocking(req: HttpRequest) -> Result<HttpResponse, TransportError> {
     {
         headers.push(("user-agent".to_string(), USER_AGENT.as_bytes().to_vec()));
     }
+    if !req
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("accept-encoding"))
+    {
+        headers.push((
+            "accept-encoding".to_string(),
+            content_encoding::ACCEPT_ENCODING.as_bytes().to_vec(),
+        ));
+    }
     let fields = Fields::from_list(&headers)
         .map_err(|e| TransportError::Other(format!("invalid request header: {e}")))?;
 
@@ -163,6 +175,15 @@ fn send_blocking(req: HttpRequest) -> Result<HttpResponse, TransportError> {
     };
 
     let status = response.status();
+    // Read before the header list is built below, which drops non-UTF-8 values.
+    let encodings: Vec<String> = response
+        .headers()
+        .get("content-encoding")
+        .iter()
+        .map(|value| String::from_utf8_lossy(value).into_owned())
+        .collect();
+    let coding = content_encoding::coding_of(encodings.iter().map(String::as_str));
+    // The body is decoded below, so the header no longer describes it.
     let resp_headers = response
         .headers()
         .entries()
@@ -170,6 +191,7 @@ fn send_blocking(req: HttpRequest) -> Result<HttpResponse, TransportError> {
         .filter_map(|(name, value)| {
             Some((name.to_ascii_lowercase(), String::from_utf8(value).ok()?))
         })
+        .filter(|(name, _)| name != "content-encoding")
         .collect();
 
     let incoming = response
@@ -179,8 +201,20 @@ fn send_blocking(req: HttpRequest) -> Result<HttpResponse, TransportError> {
     // kept only for the message, so they get the smaller cap.
     let body = match status {
         300..=399 => Vec::new(),
-        400..=599 => read_body(&incoming, &req.url, deadline, ERROR_BODY_CAP)?,
-        _ => read_body(&incoming, &req.url, deadline, MAX_BODY_BYTES)?,
+        400..=599 => read_body(
+            &incoming,
+            &req.url,
+            deadline,
+            ERROR_BODY_CAP,
+            body_coding(coding, &req.url)?,
+        )?,
+        _ => read_body(
+            &incoming,
+            &req.url,
+            deadline,
+            MAX_BODY_BYTES,
+            body_coding(coding, &req.url)?,
+        )?,
     };
     // The stream is a child of the body and is dropped by `read_body`, so the
     // body can now be finished.
@@ -234,42 +268,85 @@ fn write_body(body: &OutgoingBody, bytes: &[u8]) -> Result<(), TransportError> {
     Ok(())
 }
 
-/// Read a response body under `cap`, waiting for each chunk against the
-/// request deadline. Oversized bodies are truncated, not rejected, as on the
-/// native transport.
+/// The coding to decode a body with, or an error naming the unsupported one.
+fn body_coding(coding: Result<Coding, String>, target: &str) -> Result<Coding, TransportError> {
+    coding.map_err(|c| {
+        TransportError::Other(format!("unsupported Content-Encoding `{c}` from {target}"))
+    })
+}
+
+/// A blocking `Read` over a response body. Each chunk waits against the request
+/// deadline, so a decoder reading through it is held to the same timeout as the
+/// rest of the exchange.
+struct BodyReader<'a> {
+    stream: InputStream,
+    target: &'a str,
+    deadline: Option<u64>,
+    /// The transport error behind a failed read. The decoder only sees an
+    /// `io::Error`, so the cause is kept here and reported instead.
+    failure: Option<TransportError>,
+}
+
+impl Read for BodyReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let want = (buf.len() as u64).min(READ_CHUNK);
+        loop {
+            let ready = {
+                let pollable = self.stream.subscribe();
+                wait_ready(&pollable, self.deadline)
+            };
+            if !ready {
+                self.failure = Some(TransportError::Timeout(self.target.to_string()));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "response body timed out",
+                ));
+            }
+            match self.stream.read(want) {
+                Ok(chunk) if chunk.is_empty() => continue,
+                Ok(chunk) => {
+                    buf[..chunk.len()].copy_from_slice(&chunk);
+                    return Ok(chunk.len());
+                }
+                Err(StreamError::Closed) => return Ok(0),
+                Err(StreamError::LastOperationFailed(e)) => {
+                    self.failure = Some(TransportError::Other(format!(
+                        "reading the response body: {e}"
+                    )));
+                    return Err(io::Error::other("reading the response body failed"));
+                }
+            }
+        }
+    }
+}
+
+/// Read and decode a response body, keeping at most `cap` decoded bytes and
+/// waiting for each chunk against the request deadline. Oversized bodies are
+/// truncated, not rejected, as on the native transport.
 fn read_body(
     body: &IncomingBody,
     target: &str,
     deadline: Option<u64>,
     cap: usize,
+    coding: Coding,
 ) -> Result<Vec<u8>, TransportError> {
     let stream: InputStream = body
         .stream()
         .map_err(|()| other("response body stream is unavailable"))?;
-    let mut buf = Vec::new();
-    loop {
-        let ready = {
-            let pollable = stream.subscribe();
-            wait_ready(&pollable, deadline)
-        };
-        if !ready {
-            return Err(TransportError::Timeout(target.to_string()));
-        }
-        match stream.read(READ_CHUNK) {
-            Ok(chunk) => {
-                if push_capped(&mut buf, &chunk, cap) {
-                    break;
-                }
-            }
-            Err(StreamError::Closed) => break,
-            Err(StreamError::LastOperationFailed(e)) => {
-                return Err(TransportError::Other(format!(
-                    "reading the response body: {e}"
-                )))
-            }
-        }
+    let mut reader = BodyReader {
+        stream,
+        target,
+        deadline,
+        failure: None,
+    };
+    let result = content_encoding::read_capped(&mut reader, coding, cap);
+    if let Some(failure) = reader.failure.take() {
+        return Err(failure);
     }
-    Ok(buf)
+    result.map_err(|e| TransportError::Other(format!("decoding the response body: {e}")))
 }
 
 /// Map a host error onto the transport's categories. Timeouts and connection
