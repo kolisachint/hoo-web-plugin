@@ -5,11 +5,13 @@
 //! abstraction the libraries send requests through. The native
 //! [`transport::ReqwestTransport`] and shared TLS trust configuration ([`tls`])
 //! are behind the `native` feature; the WASI 0.2 [`transport::WasiTransport`]
-//! is behind `wasi`. Both leaf crates re-export these so their internal modules
-//! can keep using `crate::compress` / `crate::refs` / `crate::tls`.
+//! is behind `wasi`, and decodes gzip, deflate and brotli bodies itself
+//! ([`content_encoding`]). Both leaf crates re-export these so their internal
+//! modules can keep using `crate::compress` / `crate::refs` / `crate::tls`.
 
 pub mod charset;
 pub mod compress;
+pub mod content_encoding;
 pub mod http;
 pub mod refs;
 pub mod transport;

@@ -30,7 +30,7 @@ pub const ERROR_BODY_CAP: usize = 64 * 1024;
 
 /// Append as much of `chunk` to `buf` as fits under `max`. Returns `true` once
 /// the cap is reached (the body is truncated and the caller should stop).
-#[cfg_attr(not(any(feature = "native", feature = "wasi")), allow(dead_code))]
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
 pub(crate) fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
     let remaining = max.saturating_sub(buf.len());
     if chunk.len() >= remaining {
