@@ -236,6 +236,8 @@ async fn run() -> anyhow::Result<ExitCode> {
                 timeout_secs: timeout.or(fetch_config.timeout_secs).unwrap_or(10),
                 tls: tls_config(ca_cert, insecure, &fetch_config.ca_certs),
             };
+            // Refuse a bad budget or pattern before any download.
+            options.validate()?;
 
             let result = match from_file {
                 Some(path) => {
@@ -247,7 +249,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                         );
                     }
                     let (body, undecodable) = read_input(&path)?;
-                    let mut result = webfetch::convert_body(&body, &base, None, &options);
+                    let mut result = webfetch::convert_body(&body, &base, None, &options)?;
                     if undecodable.is_some() {
                         result.metadata.charset = undecodable;
                     }
@@ -274,7 +276,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                             page
                         }
                     };
-                    webfetch::convert_page(page, &options)
+                    webfetch::convert_page(page, &options)?
                 }
             };
 

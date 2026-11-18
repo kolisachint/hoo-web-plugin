@@ -79,6 +79,34 @@ pub struct SearchOptions {
     pub fallback: Option<Provider>,
 }
 
+/// A search request the backends cannot run as asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionsError {
+    /// The query is empty or only whitespace. A provider rejects it, and a
+    /// request that was never going to answer should not be sent.
+    EmptyQuery,
+}
+
+impl std::fmt::Display for OptionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OptionsError::EmptyQuery => write!(f, "search query must not be empty"),
+        }
+    }
+}
+
+impl std::error::Error for OptionsError {}
+
+impl SearchOptions {
+    /// Check the options before any request is made.
+    pub fn validate(&self) -> Result<(), OptionsError> {
+        if self.query.trim().is_empty() {
+            return Err(OptionsError::EmptyQuery);
+        }
+        Ok(())
+    }
+}
+
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {

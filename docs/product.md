@@ -91,7 +91,8 @@ webtools fetch --url https://example.com --max-tokens 2000
 
 ### Token budget
 
-`--max-tokens` is a cap on the *whole* output, not just the body. The body is
+`--max-tokens` is a cap on the *whole* output, not just the body. It must be at
+least 1: a budget of 0 is refused rather than returning one character. The body is
 truncated first, and then only the references the surviving text still cites are
 kept — dropping a reference nobody mentions costs nothing, and it is usually
 enough on its own. If the block still does not fit, references come off the tail
@@ -221,10 +222,11 @@ Raw pages are cached rather than converted output, so one entry serves every
 window costs far less than re-fetching.
 
 Offsets address the *extracted* text, not the source bytes, so they are stable
-across output formats of the same document. An offset past the end is a stale
-bookmark, not an error: it yields an empty window with no continuation.
-Structured output is addressed by blocks rather than bytes, so it is not
-windowed.
+across output formats of the same document. An offset at or past the end of the
+text is an error that states the size of the content (`offset 999999 is past the
+end of the content (156 bytes)`), not an empty window: a caller reading an empty
+window would take the page for one with no text. Structured output is addressed
+by blocks rather than bytes, so it is not windowed and its offset is ignored.
 
 In JSON (`--json`) the same accounting is `offset`, `next_offset`,
 `total_bytes`, `total_token_estimate`, and `truncated`.
@@ -254,6 +256,13 @@ which it is.
 A blocked search exits non-zero and is marked `isError` over MCP. Anything less
 and a rate-limited search looks exactly like a subject the web has nothing on —
 which is how an agent ends up confidently reporting that nothing exists.
+
+Bad arguments are errors rather than results. A `--max-tokens` of 0, a `--grep`
+pattern that does not compile, and an empty search query are refused before any
+request is made. An `--offset` past the end of the content can only be checked
+once the page is converted, so it is refused after the fetch, before any content
+is returned. The message names the argument and the reason. In the plugin these
+are reported as `invalid-args`.
 
 ### Offline / piped input
 
@@ -416,7 +425,9 @@ environment.
 The same libraries run inside hoocode as a WASI 0.2 component
 (`plugin/dev.hoocode/extension.wasm`), with no `webtools` binary on the path. The
 tools are `ext_webtools_fetch` and `ext_webtools_search`, with the MCP argument
-names and defaults. Requests go through hoocode's permission gate and its SSRF
+names and defaults. The plugin caps each request (8 s for `fetch`, 12 s for
+`search`) and each call at 25 s, so a slow search provider is given time to answer
+and a fallback still gets a turn. Requests go through hoocode's permission gate and its SSRF
 block, and search keys come from hoocode's settings under `pluginConfig.webtools` (`searchProvider`,
 `braveApiKey`, `tavilyApiKey`, `searxngUrl`). The component's build, tools and
 settings are in [`plugin/README.md`](../plugin/README.md).
@@ -607,7 +618,10 @@ crates and the core share:
   store, the SSRF guard with DNS pinning, and tokio for the retry timer.
   `fetch_page`, `fetch_and_convert`, `run_search` and `Provider::search` use it.
 - `wasi`: `WasiTransport`, which sends through `wasi:http/outgoing-handler` from
-  a `wasm32-wasip2` component. It pulls in no tokio, reqwest or rustls.
+  a `wasm32-wasip2` component. It pulls in no tokio, reqwest or rustls. It sends
+  `Accept-Encoding: gzip, br` unless the caller sets one, and decodes gzip,
+  deflate and brotli bodies itself (the 5 MiB cap counts decoded bytes). A body
+  under any other `Content-Encoding` is an error, not returned raw.
 
 The two may both be on, and the native entry points keep working.
 The generic entry points take any transport: `webfetch::fetch_with(&transport,

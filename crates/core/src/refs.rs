@@ -72,28 +72,44 @@ const MIN_BODY_TOKENS: usize = 64;
 /// budget — the sequence is monotone and converges in two or three passes.
 const FIT_PASSES: usize = 6;
 
-/// Collect the distinct `[N]` reference indices cited in `text`, in order.
-pub fn cited_indices(text: &str) -> BTreeSet<usize> {
-    let mut out = BTreeSet::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'[' {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 1;
-        while j < bytes.len() && bytes[j].is_ascii_digit() {
-            j += 1;
-        }
-        if j > i + 1 && j < bytes.len() && bytes[j] == b']' {
-            if let Ok(n) = text[i + 1..j].parse::<usize>() {
-                out.insert(n);
-            }
-        }
-        i = j.max(i + 1);
-    }
-    out
+/// One reference marker the converter emitted: the byte range of its visible
+/// text in a body, and the reference it cites.
+///
+/// Markers are recorded where they are emitted, not recovered by scanning the
+/// text. Page text can contain `[74]` of its own (a footnote whose anchor
+/// points at a same-page target earns no reference), and a scan cannot tell
+/// that from a marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Citation {
+    pub start: usize,
+    pub end: usize,
+    pub index: usize,
+}
+
+/// The reference indices whose markers lie entirely within the first `len`
+/// bytes of the body they were recorded against.
+pub fn cited_within(citations: &[Citation], len: usize) -> BTreeSet<usize> {
+    citations
+        .iter()
+        .filter(|c| c.end <= len)
+        .map(|c| c.index)
+        .collect()
+}
+
+/// The citations inside `body[start..]`, moved so they index that slice.
+///
+/// A marker that begins before `start` is not in the slice, even if its tail
+/// is, so it is dropped rather than clipped.
+pub fn rebase(citations: &[Citation], start: usize) -> Vec<Citation> {
+    citations
+        .iter()
+        .filter(|c| c.start >= start)
+        .map(|c| Citation {
+            start: c.start - start,
+            end: c.end - start,
+            index: c.index,
+        })
+        .collect()
 }
 
 /// Join a body and a rendered reference block into final output.
@@ -119,6 +135,10 @@ pub struct Fitted {
 
 /// Fit `body` plus its reference block inside `max_tokens`.
 ///
+/// `citations` are the markers the converter emitted into `body`, with offsets
+/// relative to `body`. A reference is kept only if one of those markers survives
+/// the truncation.
+///
 /// Returns the assembled content, the reference indices it kept, and how far
 /// into the body it got.
 ///
@@ -130,18 +150,24 @@ pub struct Fitted {
 /// costs nothing and is usually enough on its own; if the block still does not
 /// fit, references are dropped from the tail so the cap holds.
 ///
-/// With `max_tokens == None` nothing is truncated and every reference is kept.
+/// With `max_tokens == None` nothing is truncated, but the block still lists
+/// only the references the body cites: a window that starts past a link must
+/// not name that link.
 pub fn fit_to_budget<T: Referable>(
     body: &str,
+    citations: &[Citation],
     references: &[T],
     max_tokens: Option<usize>,
 ) -> Fitted {
-    let all = || references.iter().map(Referable::index).collect::<Vec<_>>();
-
     let Some(max_tokens) = max_tokens else {
+        let cited = cited_within(citations, body.len());
+        let kept: Vec<&T> = references
+            .iter()
+            .filter(|r| cited.contains(&r.index()))
+            .collect();
         return Fitted {
-            content: assemble(body, &render_block(references)),
-            kept: all(),
+            content: assemble(body, &render_block(&kept)),
+            kept: kept.iter().map(|r| r.index()).collect(),
             body_consumed: body.len(),
         };
     };
@@ -149,14 +175,14 @@ pub fn fit_to_budget<T: Referable>(
     let full_len = body.len();
     let mut budget = max_tokens;
     for pass in 0..FIT_PASSES {
-        let (body, consumed) = truncate_to_tokens_at(body, budget);
-        let cited = cited_indices(&body);
+        let (cut, consumed) = truncate_to_tokens_at(body, budget);
+        let cited = cited_within(citations, consumed);
         let kept: Vec<&T> = references
             .iter()
             .filter(|r| cited.contains(&r.index()))
             .collect();
         let block = render_block(&kept);
-        let content = assemble(&body, &block);
+        let content = assemble(&cut, &block);
         let total = estimate_tokens(&content);
 
         if total <= max_tokens {
@@ -169,7 +195,7 @@ pub fn fit_to_budget<T: Referable>(
         if pass + 1 == FIT_PASSES || budget <= MIN_BODY_TOKENS {
             // The block alone is over budget (very long URLs, very small cap).
             // Drop references from the tail until the whole thing fits.
-            return drop_until_fits(&body, &kept, max_tokens, consumed.min(full_len));
+            return drop_until_fits(&cut, &kept, max_tokens, consumed.min(full_len));
         }
         // Scale the body budget by how far over we landed, rather than
         // subtracting the overshoot. Subtracting punishes the body for the
@@ -182,7 +208,7 @@ pub fn fit_to_budget<T: Referable>(
         if next >= budget {
             // Not converging (already at the floor): stop shrinking the body
             // and take references off the tail instead.
-            return drop_until_fits(&body, &kept, max_tokens, consumed.min(full_len));
+            return drop_until_fits(&cut, &kept, max_tokens, consumed.min(full_len));
         }
         budget = next;
     }
@@ -230,25 +256,124 @@ mod tests {
             .collect()
     }
 
-    fn body_citing(n: usize) -> String {
-        (1..=n)
-            .map(|i| format!("Item {i} with filler prose describing the thing [{i}]."))
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// A body of `n` items, each ending in a `[i]` marker, with the markers'
+    /// offsets recorded as they are written.
+    fn body_citing(n: usize) -> (String, Vec<Citation>) {
+        let mut body = String::new();
+        let mut citations = Vec::new();
+        for i in 1..=n {
+            if i > 1 {
+                body.push('\n');
+            }
+            body.push_str(&format!("Item {i} with filler prose describing the thing "));
+            let start = body.len();
+            body.push_str(&format!("[{i}]"));
+            citations.push(Citation {
+                start,
+                end: body.len(),
+                index: i,
+            });
+            body.push('.');
+        }
+        (body, citations)
     }
 
     #[test]
-    fn cited_indices_finds_markers() {
-        let got = cited_indices("a [1] b [12] c [x] d [3]");
-        assert_eq!(got.into_iter().collect::<Vec<_>>(), vec![1, 3, 12]);
+    fn literal_bracketed_numbers_are_not_citations() {
+        // A footnote's `[1]` is page text; only recorded markers may cite.
+        let body = "Values have one owner.[1] Values are moved.";
+        let refs = refs(1);
+        let Fitted { content, kept, .. } = fit_to_budget(body, &[], &refs, Some(1000));
+        assert!(kept.is_empty(), "kept {kept:?}");
+        assert!(!content.contains("References:"), "{content}");
+    }
+
+    #[test]
+    fn cited_within_counts_only_markers_fully_inside() {
+        let citations = [
+            Citation {
+                start: 0,
+                end: 3,
+                index: 1,
+            },
+            Citation {
+                start: 10,
+                end: 13,
+                index: 2,
+            },
+        ];
+        assert_eq!(
+            cited_within(&citations, 3).into_iter().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            cited_within(&citations, 12).into_iter().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            cited_within(&citations, 13).into_iter().collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn rebase_drops_markers_before_the_start_and_shifts_the_rest() {
+        let citations = [
+            Citation {
+                start: 2,
+                end: 5,
+                index: 1,
+            },
+            Citation {
+                start: 8,
+                end: 11,
+                index: 2,
+            },
+        ];
+        // A marker straddling the start is dropped, not clipped.
+        assert_eq!(
+            rebase(&citations, 3),
+            vec![Citation {
+                start: 5,
+                end: 8,
+                index: 2
+            }]
+        );
+        assert_eq!(rebase(&citations, 0), citations.to_vec());
     }
 
     #[test]
     fn no_budget_keeps_everything() {
-        let Fitted { content, kept, .. } = fit_to_budget(&body_citing(3), &refs(3), None);
+        let (body, citations) = body_citing(3);
+        let Fitted { content, kept, .. } = fit_to_budget(&body, &citations, &refs(3), None);
         assert_eq!(kept, vec![1, 2, 3]);
         assert!(content.contains("References:"));
         assert!(content.contains("[3] https://example.com"));
+    }
+
+    /// With no budget the body is whole, so every cited reference is kept, and
+    /// a reference no marker cites (its link sat in stripped text) is not.
+    #[test]
+    fn no_budget_lists_only_cited_references() {
+        let (body, citations) = body_citing(3);
+        let refs = refs(4);
+        let Fitted { content, kept, .. } = fit_to_budget(&body, &citations, &refs, None);
+        assert_eq!(kept, vec![1, 2, 3]);
+        assert!(content.contains("[3] https://example.com"));
+        assert!(!content.contains("[4] https://example.com"), "{content}");
+    }
+
+    /// A window that starts after a marker must not list that marker's
+    /// reference: the caller's `rebase` drops the marker, so nothing cites it.
+    #[test]
+    fn no_budget_window_drops_references_cited_before_it() {
+        let (body, citations) = body_citing(3);
+        let start = body.find("Item 2").unwrap();
+        let window = &body[start..];
+        let citations = rebase(&citations, start);
+        let Fitted { content, kept, .. } = fit_to_budget(window, &citations, &refs(3), None);
+        assert_eq!(kept, vec![2, 3]);
+        assert!(!content.contains("[1] https://example.com"), "{content}");
     }
 
     /// The regression this function exists for: a link-dense page must not
@@ -256,7 +381,8 @@ mod tests {
     #[test]
     fn link_dense_page_respects_the_cap() {
         let refs = refs(120);
-        let Fitted { content, kept, .. } = fit_to_budget(&body_citing(120), &refs, Some(200));
+        let (body, citations) = body_citing(120);
+        let Fitted { content, kept, .. } = fit_to_budget(&body, &citations, &refs, Some(200));
         assert!(
             estimate_tokens(&content) <= 200,
             "estimate {} content: {content}",
@@ -268,9 +394,10 @@ mod tests {
     #[test]
     fn every_kept_reference_is_still_cited() {
         let refs = refs(120);
-        let Fitted { content, kept, .. } = fit_to_budget(&body_citing(120), &refs, Some(300));
-        let body = content.split("References:").next().unwrap();
-        let cited = cited_indices(body);
+        let (body, citations) = body_citing(120);
+        let Fitted { content, kept, .. } = fit_to_budget(&body, &citations, &refs, Some(300));
+        let text = content.split("References:").next().unwrap();
+        let cited = cited_within(&citations, text.len());
         for index in &kept {
             assert!(cited.contains(index), "kept [{index}] is not cited");
         }
@@ -281,7 +408,8 @@ mod tests {
     #[test]
     fn a_generous_budget_is_actually_used() {
         let refs = refs(120);
-        let Fitted { content, .. } = fit_to_budget(&body_citing(120), &refs, Some(1000));
+        let (body, citations) = body_citing(120);
+        let Fitted { content, .. } = fit_to_budget(&body, &citations, &refs, Some(1000));
         let used = estimate_tokens(&content);
         assert!(used <= 1000, "over budget: {used}");
         assert!(used >= 800, "left {} of 1000 tokens unused", 1000 - used);
@@ -290,7 +418,8 @@ mod tests {
     #[test]
     fn tiny_budget_still_fits() {
         let refs = refs(40);
-        let Fitted { content, .. } = fit_to_budget(&body_citing(40), &refs, Some(80));
+        let (body, citations) = body_citing(40);
+        let Fitted { content, .. } = fit_to_budget(&body, &citations, &refs, Some(80));
         assert!(
             estimate_tokens(&content) <= 80,
             "estimate {}",
@@ -301,8 +430,8 @@ mod tests {
     #[test]
     fn generous_budget_is_a_noop() {
         let refs = refs(3);
-        let body = body_citing(3);
-        let Fitted { content, kept, .. } = fit_to_budget(&body, &refs, Some(100_000));
+        let (body, citations) = body_citing(3);
+        let Fitted { content, kept, .. } = fit_to_budget(&body, &citations, &refs, Some(100_000));
         assert_eq!(kept, vec![1, 2, 3]);
         assert_eq!(content, assemble(&body, &render_block(&refs)));
     }
@@ -310,7 +439,8 @@ mod tests {
     #[test]
     fn body_without_references_is_plain_truncation() {
         let empty: [Reference; 0] = [];
-        let Fitted { content, kept, .. } = fit_to_budget(&"word ".repeat(500), &empty, Some(50));
+        let Fitted { content, kept, .. } =
+            fit_to_budget(&"word ".repeat(500), &[], &empty, Some(50));
         assert!(kept.is_empty());
         assert!(content.contains("…[truncated]"));
         assert!(estimate_tokens(&content) <= 50);

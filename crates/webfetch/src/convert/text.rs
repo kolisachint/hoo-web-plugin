@@ -13,6 +13,7 @@ use scraper::node::Node;
 use scraper::{ElementRef, Html};
 use url::Url;
 
+use super::{plain, push_citation, push_literal, resolve_citations};
 use crate::extract;
 use crate::types::UrlReference;
 
@@ -23,6 +24,9 @@ pub(crate) struct RefCollector {
     seen: HashMap<String, usize>,
     pub(crate) references: Vec<UrlReference>,
     base: Option<Url>,
+    /// How many anchors the walk is inside. A link nested in a link is not a
+    /// second link, so only the outermost anchor earns a marker.
+    pub(crate) anchor_depth: usize,
 }
 
 impl RefCollector {
@@ -31,6 +35,7 @@ impl RefCollector {
             seen: HashMap::new(),
             references: Vec::new(),
             base: Url::parse(base_url).ok(),
+            anchor_depth: 0,
         }
     }
 
@@ -107,7 +112,7 @@ const CELL_SEPARATOR: &str = " | ";
 
 fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
     match node.value() {
-        Node::Text(t) => out.push_str(&t[..]),
+        Node::Text(t) => push_literal(out, &t[..]),
         Node::Element(el) => {
             let name = el.name();
             if super::is_skippable(name) {
@@ -120,18 +125,34 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
             }
 
             if name == "a" {
+                if refs.anchor_depth > 0 {
+                    // Nested in a link: its text reads as part of the outer one.
+                    for child in node.children() {
+                        walk(child, out, refs);
+                    }
+                    return;
+                }
+                // Only an anchor that earns a marker suppresses the links inside
+                // it. An `<a name>` with no usable href is not a link.
+                let resolved = el.attr("href").and_then(|href| refs.resolve(href));
+                let linked = resolved.is_some();
                 // Collect the anchor's inner text first.
+                if linked {
+                    refs.anchor_depth += 1;
+                }
                 let mut inner = String::new();
                 for child in node.children() {
                     walk(child, &mut inner, refs);
                 }
-                let inner = inner.trim().to_string();
+                if linked {
+                    refs.anchor_depth -= 1;
+                }
+                let inner = plain(&inner).trim().to_string();
                 out.push_str(&inner);
-                if let Some(href) = el.attr("href") {
-                    if let Some(resolved) = refs.resolve(href) {
-                        let idx = refs.index_for(resolved, &inner);
-                        out.push_str(&format!(" [{}]", idx));
-                    }
+                if let Some(resolved) = resolved {
+                    let idx = refs.index_for(resolved, &inner);
+                    out.push(' ');
+                    push_citation(out, idx, &format!("[{idx}]"));
                 }
                 return;
             }
@@ -163,12 +184,10 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
     }
 }
 
-/// Convert a parsed HTML document to reference-style plain text.
-///
-/// Returns the body text (with inline `[N]` markers) and the ordered list of
-/// references. The returned text does **not** include the rendered
-/// "References:" block — see [`render_references`] to append it.
-pub fn text_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
+/// The text walk's working string, still carrying its marker delimiters, and
+/// the references it collected. Callers that need the markers' positions run
+/// [`resolve_citations`] on it after any whitespace compression.
+pub(crate) fn text_working(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
     let root: ElementRef = match extract::content_root(doc) {
         Some(el) => el,
         None => return (String::new(), Vec::new()),
@@ -180,6 +199,16 @@ pub fn text_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>)
         walk(child, &mut out, &mut refs);
     }
     (out, refs.references)
+}
+
+/// Convert a parsed HTML document to reference-style plain text.
+///
+/// Returns the body text (with inline `[N]` markers) and the ordered list of
+/// references. The returned text does **not** include the rendered
+/// "References:" block — see [`render_references`] to append it.
+pub fn text_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
+    let (working, references) = text_working(doc, base_url);
+    (resolve_citations(&working).0, references)
 }
 
 /// [`text_with_refs`] for callers holding raw HTML. Parses the document; prefer
@@ -207,6 +236,17 @@ mod tests {
         let (text, _) = html_to_text_with_refs(html, "https://x.test/");
         assert!(text.contains("Name | Type"), "text: {text:?}");
         assert!(text.contains("alpha | string"), "text: {text:?}");
+    }
+
+    /// An `<a name>` has no destination, so it does not suppress the link
+    /// inside it: the table's link keeps its marker and reference.
+    #[test]
+    fn a_link_inside_an_anchor_without_href_keeps_its_marker() {
+        let html = r#"<article><a name="x"><table><tr><td><a href="https://x.test/b">inner</a></td></tr></table></a></article>"#;
+        let (text, refs) = html_to_text_with_refs(html, "https://x.test/");
+        assert_eq!(refs.len(), 1, "refs: {refs:?}");
+        assert_eq!(refs[0].url, "https://x.test/b");
+        assert!(text.contains("inner [1]"), "text: {text:?}");
     }
 
     #[test]

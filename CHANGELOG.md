@@ -133,6 +133,19 @@ lockstep semantic versioning across all crates.
 
 ### Fixed
 
+- **Footnote text pulled in wrong references.** Page text such as Wikipedia's
+  `owner.[74]` was read as a link marker, so the references list mapped it to an
+  unrelated URL. The converter now records the markers it emits, and only those
+  references are listed (text, markdown and structured).
+- **The WASI transport returned compressed bodies.** A `Content-Encoding: gzip`
+  response reached the converter as raw bytes. The WASI path now decodes gzip,
+  deflate and brotli (capped on decoded size), refuses other codings with an
+  error, and a body that is mostly control bytes is reported as non-text.
+- **Plugin search timed out on slow providers.** The per-request search cap is
+  12 s (was 6 s); a fallback provider still gets at least 8 s of the 25 s budget.
+- **Bad arguments now fail as errors:** an empty search query, `max_tokens: 0`,
+  an invalid `grep` pattern, and an `offset` past the end of the content (which
+  was reported as a JavaScript-rendered page).
 - **CJK pages came back as mojibake.** Shift_JIS, GBK, GB18030, Big5, EUC-KR,
   EUC-JP and ISO-2022-JP are now decoded exactly, along with the rest of the
   WHATWG Encoding Standard, via `encoding_rs`. 0.2.0 decoded only UTF-8 and the
@@ -146,6 +159,23 @@ lockstep semantic versioning across all crates.
 
 ### Breaking
 
+- **`convert_body`, `convert_html` and `convert_page` return
+  `Result<FetchResult, OptionsError>`**, so invalid options are reported
+  instead of embedded in the content.
+- **`webfetch_core::refs::cited_indices` is removed.** It scanned text for
+  `[N]`, which read page text as markers. Use the `Citation`s the converter
+  records instead, with `refs::cited_within` or `refs::rebase`.
+- **`refs::fit_to_budget` takes a `citations: &[Citation]` parameter** after
+  `body`: the markers emitted into `body`, with offsets relative to it. Callers
+  that passed only the body must record the markers and pass them in.
+- **`convert::Converted` has a new public field `citations`** (`Vec<Citation>`).
+  Exhaustive struct literals need it.
+- **`media::classify` may return `Other` for a declared text type** whose body
+  looks binary (C0 control bytes in the first 8 KiB). Such a body is no longer
+  rendered as text, whatever its `Content-Type`.
+- **`websearch::run_search_with` errors on an empty query.** An empty or
+  whitespace-only query fails with `OptionsError::EmptyQuery` before any request
+  is made; it used to be sent to the provider.
 - **`webfetch_core::http` loses its reqwest helpers.** `read_body_capped`,
   `read_body_capped_bytes` and `transient_send_error` are removed; the transport
   reads the body and classifies the send error. `transient_status` takes the

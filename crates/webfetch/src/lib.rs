@@ -27,7 +27,9 @@ pub mod types;
 pub use fetch::fetch_page;
 pub use fetch::fetch_with;
 use media::Media;
-use types::{ContentStatus, ContentType, FetchOptions, FetchResult, Metadata, UrlReference};
+use types::{
+    ContentStatus, ContentType, FetchOptions, FetchResult, Metadata, OptionsError, UrlReference,
+};
 
 use scraper::{Html, Selector};
 
@@ -35,19 +37,27 @@ use scraper::{Html, Selector};
 ///
 /// Useful for tests and for callers that obtain HTML by other means. Always
 /// treats the input as HTML; use [`convert_body`] for media-aware handling.
-pub fn convert_html(html: &str, source_url: &str, options: &FetchOptions) -> FetchResult {
+pub fn convert_html(
+    html: &str,
+    source_url: &str,
+    options: &FetchOptions,
+) -> Result<FetchResult, OptionsError> {
     convert_body(html, source_url, Some("text/html"), options)
 }
 
 /// Convert a fetched body to a [`FetchResult`], choosing how to treat it based
 /// on its `Content-Type` (or a sniff of the body). HTML is extracted; JSON is
 /// pretty-printed; other text is passed through verbatim; binary is summarized.
+///
+/// Fails when the options cannot be honoured: see [`FetchOptions::validate`],
+/// and an `offset` at or past the end of the converted text.
 pub fn convert_body(
     body: &str,
     source_url: &str,
     content_type_header: Option<&str>,
     options: &FetchOptions,
-) -> FetchResult {
+) -> Result<FetchResult, OptionsError> {
+    options.validate()?;
     let media = media::classify(content_type_header, body);
 
     // Refuse a pathologically nested document before parsing it — see
@@ -55,20 +65,20 @@ pub fn convert_body(
     // entry point (network fetch, `--from-file`, library caller) is covered.
     if matches!(media, Media::Html) {
         if let Some(depth) = limits::too_deeply_nested(body) {
-            return too_complex_result(source_url, depth, options.content_type);
+            return Ok(too_complex_result(source_url, depth, options.content_type));
         }
     }
 
     let (title, content, references, metadata, output_type, window, sections, matches) =
         match &media {
-            Media::Html => convert_html_body(body, source_url, content_type_header, options),
+            Media::Html => convert_html_body(body, source_url, content_type_header, options)?,
             Media::Json => {
                 // Pretty-print so an agent reads clean JSON; fall back to raw.
                 let pretty = serde_json::from_str::<serde_json::Value>(body)
                     .ok()
                     .and_then(|v| serde_json::to_string_pretty(&v).ok())
                     .unwrap_or_else(|| body.trim().to_string());
-                let (content, window) = budget_plain(&pretty, options);
+                let (content, window) = budget_plain(&pretty, options)?;
                 (
                     String::new(),
                     content,
@@ -81,7 +91,7 @@ pub fn convert_body(
                 )
             }
             Media::Text => {
-                let (content, window) = budget_plain(body.trim(), options);
+                let (content, window) = budget_plain(body.trim(), options)?;
                 (
                     String::new(),
                     content,
@@ -112,7 +122,7 @@ pub fn convert_body(
             }
         };
 
-    FetchResult {
+    Ok(FetchResult {
         token_estimate: compress::estimate_tokens(&content),
         total_token_estimate: window.total_token_estimate,
         total_bytes: window.total_bytes,
@@ -130,7 +140,22 @@ pub fn convert_body(
         references,
         metadata,
         source: source_url.to_string(),
+    })
+}
+
+/// Refuse an `offset` that cannot start inside the text it indexes.
+///
+/// An offset of zero is always valid, so an empty page still reaches the
+/// "no text" classification. Past the end, the window would be empty and the
+/// caller would be told the page renders with JavaScript, which is not why.
+fn check_offset(offset: usize, total_bytes: usize) -> Result<(), OptionsError> {
+    if offset > 0 && offset >= total_bytes {
+        return Err(OptionsError::OffsetPastEnd {
+            offset,
+            total_bytes,
+        });
     }
+    Ok(())
 }
 
 /// How much of the extracted body one result covers.
@@ -217,16 +242,19 @@ fn convert_html_body(
     source_url: &str,
     content_type_header: Option<&str>,
     options: &FetchOptions,
-) -> (
-    String,
-    String,
-    Vec<UrlReference>,
-    Metadata,
-    ContentType,
-    Window,
-    Vec<outline::Section>,
-    Vec<grep::Match>,
-) {
+) -> Result<
+    (
+        String,
+        String,
+        Vec<UrlReference>,
+        Metadata,
+        ContentType,
+        Window,
+        Vec<outline::Section>,
+        Vec<grep::Match>,
+    ),
+    OptionsError,
+> {
     let doc = Html::parse_document(body);
     let title = extract::extract_title(&doc);
     let mut metadata = extract::extract_metadata(&doc);
@@ -235,7 +263,8 @@ fn convert_html_body(
     let converted = convert::convert_parsed(&doc, source_url, options.content_type);
     // Drop a leading body line that merely repeats the title (common when the
     // title was derived from the page's first <h1>, which also opens the body).
-    let body_text = strip_duplicate_title(&title, converted.content);
+    let (body_text, citations) =
+        strip_duplicate_title(&title, converted.content, converted.citations);
 
     // The outline is a different view of the same document, not a slice of it:
     // it replaces the body with a map of where the body's sections are. Built
@@ -251,42 +280,29 @@ fn convert_html_body(
             offset: 0,
             next_offset: None,
         };
-        let content = match grep::compile(pattern) {
-            Ok(regex) => {
-                let sections = outline::outline(&doc, &body_text);
-                let matches = grep::grep(&body_text, &regex, &sections);
-                let rendered = grep::render(&matches, pattern, options.max_tokens);
-                return (
-                    title,
-                    rendered,
-                    Vec::new(),
-                    metadata,
-                    options.content_type,
-                    whole,
-                    Vec::new(),
-                    matches,
-                );
-            }
-            // An unusable pattern is the caller's to fix, and saying which part
-            // the engine rejected is the whole of the help we can give.
-            Err(error) => format!("[invalid search pattern /{pattern}/: {error}]"),
-        };
-        return (
+        let regex = grep::compile(pattern).map_err(|e| OptionsError::InvalidPattern {
+            pattern: pattern.clone(),
+            reason: e.to_string(),
+        })?;
+        let sections = outline::outline(&doc, &body_text);
+        let matches = grep::grep(&body_text, &regex, &sections);
+        let rendered = grep::render(&matches, pattern, options.max_tokens);
+        return Ok((
             title,
-            content,
+            rendered,
             Vec::new(),
             metadata,
             options.content_type,
             whole,
             Vec::new(),
-            Vec::new(),
-        );
+            matches,
+        ));
     }
 
     if options.outline {
         let sections = outline::outline(&doc, &body_text);
         let content = outline::render(&sections, options.max_tokens);
-        return (
+        return Ok((
             title,
             content,
             Vec::new(),
@@ -303,15 +319,23 @@ fn convert_html_body(
             },
             sections,
             Vec::new(),
-        );
+        ));
     }
 
     let (content, references, window) = match options.content_type {
         // Reference-style text: the body cites `[N]`, so the budget rule is
         // "truncate the body, then keep the references it still cites".
         ContentType::Text => {
+            check_offset(options.offset, body_text.len())?;
             let windowed = compress::window_from(&body_text, options.offset);
-            let fitted = refs::fit_to_budget(windowed, &converted.references, options.max_tokens);
+            let start = body_text.len() - windowed.len();
+            let citations = refs::rebase(&citations, start);
+            let fitted = refs::fit_to_budget(
+                windowed,
+                &citations,
+                &converted.references,
+                options.max_tokens,
+            );
             let references = converted
                 .references
                 .into_iter()
@@ -320,15 +344,20 @@ fn convert_html_body(
             let window = Window::measured(&body_text, options.offset, fitted.body_consumed);
             (fitted.content, references, window)
         }
-        // Markdown carries its links inline, so there are no markers to match
-        // on: keep the references whose URL survives in the truncated text.
+        // Markdown carries its links inline, so the references are the links
+        // whose markers survive the window, not the URLs found in its text.
         ContentType::Markdown => {
-            let (content, window) = budget_plain(&body_text, options);
+            check_offset(options.offset, body_text.len())?;
+            let windowed = compress::window_from(&body_text, options.offset);
+            let start = body_text.len() - windowed.len();
+            let (content, consumed) = truncate_window(windowed, options.max_tokens);
+            let cited = refs::cited_within(&refs::rebase(&citations, start), consumed);
             let references = converted
                 .references
                 .into_iter()
-                .filter(|r| content.contains(&r.url))
+                .filter(|r| cited.contains(&r.index))
                 .collect();
+            let window = Window::measured(&body_text, options.offset, consumed);
             (content, references, window)
         }
         // The content is JSON; truncating its text would produce invalid JSON,
@@ -346,7 +375,7 @@ fn convert_html_body(
         }
     };
 
-    (
+    Ok((
         title,
         content,
         references,
@@ -355,22 +384,24 @@ fn convert_html_body(
         window,
         Vec::new(),
         Vec::new(),
-    )
+    ))
 }
 
 /// Window and truncate free-form text (no reference markers to preserve),
 /// reporting the slice of the document it covers.
-fn budget_plain(text: &str, options: &FetchOptions) -> (String, Window) {
+fn budget_plain(text: &str, options: &FetchOptions) -> Result<(String, Window), OptionsError> {
+    check_offset(options.offset, text.len())?;
     let windowed = compress::window_from(text, options.offset);
-    match options.max_tokens {
-        Some(max) => {
-            let (content, consumed) = compress::truncate_to_tokens_at(windowed, max);
-            (content, Window::measured(text, options.offset, consumed))
-        }
-        None => (
-            windowed.to_string(),
-            Window::measured(text, options.offset, windowed.len()),
-        ),
+    let (content, consumed) = truncate_window(windowed, options.max_tokens);
+    Ok((content, Window::measured(text, options.offset, consumed)))
+}
+
+/// Cut an already-windowed text to the token budget. Returns the text and how
+/// many of its bytes it consumed.
+fn truncate_window(windowed: &str, max_tokens: Option<usize>) -> (String, usize) {
+    match max_tokens {
+        Some(max) => compress::truncate_to_tokens_at(windowed, max),
+        None => (windowed.to_string(), windowed.len()),
     }
 }
 
@@ -387,21 +418,18 @@ fn budget_structured(
 ) -> (String, Vec<UrlReference>) {
     use convert::structured::{to_json, StructuredDoc};
 
-    let parsed = convert::structured::structured(doc, source_url);
+    let (parsed, cited_blocks) = convert::structured::structured_with_citations(doc, source_url);
 
     let render = |n: usize| -> (String, Vec<UrlReference>) {
         let blocks = parsed.blocks[..n].to_vec();
-        let cited = refs::cited_indices(
-            &blocks
-                .iter()
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" "),
-        );
         let references: Vec<UrlReference> = parsed
             .references
             .iter()
-            .filter(|r| cited.contains(&r.index))
+            .filter(|r| {
+                cited_blocks[..n]
+                    .iter()
+                    .any(|cited| cited.contains(&r.index))
+            })
             .cloned()
             .collect();
         let json = to_json(&StructuredDoc {
@@ -498,21 +526,24 @@ fn undecodable_charset(header: Option<&str>, doc: &Html) -> Option<String> {
 /// When the title was derived from the page's first heading, the body repeats
 /// it as its opening line. Drop that leading line when it normalizes to the
 /// same text as `title`. Conservative: only an exact normalized match of the
-/// *first* line is removed, so genuine content is never lost.
-fn strip_duplicate_title(title: &str, content: String) -> String {
+/// *first* line is removed, so genuine content is never lost. Markers in the
+/// removed line go with it, and the rest are moved to the new offsets.
+fn strip_duplicate_title(
+    title: &str,
+    content: String,
+    citations: Vec<refs::Citation>,
+) -> (String, Vec<refs::Citation>) {
     if title.is_empty() {
-        return content;
+        return (content, citations);
     }
     let mut parts = content.splitn(2, '\n');
     let first = parts.next().unwrap_or("");
     if compress::compress_text(first) == compress::compress_text(title) {
-        return parts
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('\n')
-            .to_string();
+        let rest = parts.next().unwrap_or("").trim_start_matches('\n');
+        let start = content.len() - rest.len();
+        return (rest.to_string(), refs::rebase(&citations, start));
     }
-    content
+    (content, citations)
 }
 
 /// Convert an already-fetched page according to `options`.
@@ -520,13 +551,16 @@ fn strip_duplicate_title(title: &str, content: String) -> String {
 /// Split out of [`fetch_and_convert`] so a caller holding a page — one served
 /// from its own cache, say, which is how a document is paged without refetching
 /// it per window — converts it exactly as a live fetch would.
-pub fn convert_page(page: fetch::FetchedPage, options: &FetchOptions) -> FetchResult {
+pub fn convert_page(
+    page: fetch::FetchedPage,
+    options: &FetchOptions,
+) -> Result<FetchResult, OptionsError> {
     let mut result = convert_body(
         &page.body,
         &page.final_url,
         page.content_type.as_deref(),
         options,
-    );
+    )?;
     // `source` is what was asked for, `final_url` is where it came from. They
     // were both set to the post-redirect URL, which discarded the request.
     result.source = options.url.clone();
@@ -536,14 +570,14 @@ pub fn convert_page(page: fetch::FetchedPage, options: &FetchOptions) -> FetchRe
     if page.undecodable_charset.is_some() {
         result.metadata.charset = page.undecodable_charset;
     }
-    result
+    Ok(result)
 }
 
 /// Fetch a URL and convert it according to `options`.
 #[cfg(feature = "native")]
 pub async fn fetch_and_convert(options: FetchOptions) -> anyhow::Result<FetchResult> {
     let page = fetch::fetch_page(&options.url, options.timeout_secs, &options.tls).await?;
-    Ok(convert_page(page, &options))
+    Ok(convert_page(page, &options)?)
 }
 
 /// Parse a content-type string ("text" | "markdown" | "structured").
@@ -576,15 +610,296 @@ mod tests {
     fn script_shell_is_needs_js_not_empty() {
         let html =
             "<html><body><div id=\"root\"></div><script src=\"/app.js\"></script></body></html>";
-        let r = convert_html(html, "https://spa.test/", &FetchOptions::default());
+        let r = convert_html(html, "https://spa.test/", &FetchOptions::default()).unwrap();
         assert_eq!(r.status, ContentStatus::NeedsJs);
         assert!(r.status.is_failure());
+    }
+
+    /// A page whose only literal `[1]` is a footnote (a same-page `#cite_note`
+    /// anchor, which earns no reference), followed by filler and then a real
+    /// link that is reference #1. The footnote must never pull that link in.
+    fn footnote_page(filler_words: usize) -> String {
+        let filler = "lorem ipsum dolor sit amet ".repeat(filler_words);
+        format!(
+            r##"<html><head><title>Ownership</title></head><body><article>
+            <p>Values have exactly one owner.<sup class="reference"><a href="#cite_note-1">[1]</a></sup> Values are moved.</p>
+            <p>{filler}</p>
+            <p>Read the <a href="https://example.com/first">first link</a> and the <a href="https://example.com/second">second link</a>.</p>
+            </article></body></html>"##
+        )
+    }
+
+    #[test]
+    fn literal_footnote_text_does_not_pull_in_a_reference() {
+        let html = footnote_page(3);
+        let r = convert_html(&html, "https://x.test/", &FetchOptions::default()).unwrap();
+        assert!(r.content.contains("owner.[1] Values"), "{}", r.content);
+        let urls: Vec<_> = r
+            .references
+            .iter()
+            .map(|r| (r.index, r.url.as_str()))
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                (1, "https://example.com/first"),
+                (2, "https://example.com/second")
+            ]
+        );
+    }
+
+    #[test]
+    fn literal_footnote_text_in_a_budgeted_window_lists_no_reference() {
+        // The budget cuts the page before the real links: the only `[1]` in the
+        // returned window is the footnote, so the list must be empty.
+        let html = footnote_page(300);
+        let options = FetchOptions {
+            max_tokens: Some(120),
+            ..FetchOptions::default()
+        };
+        let r = convert_html(&html, "https://x.test/", &options).unwrap();
+        assert!(r.content.contains("owner.[1]"), "{}", r.content);
+        assert!(r.references.is_empty(), "refs: {:?}", r.references);
+        assert!(!r.content.contains("References:"), "{}", r.content);
+    }
+
+    #[test]
+    fn a_window_reports_only_the_references_it_contains() {
+        // Start the window at the real links: they are renumbered from the
+        // document, so the list must name them by their document indices.
+        let html = footnote_page(300);
+        let whole = convert_html(&html, "https://x.test/", &FetchOptions::default()).unwrap();
+        let start = whole.content.find("Read the").expect("link paragraph");
+        let options = FetchOptions {
+            offset: start,
+            ..FetchOptions::default()
+        };
+        let r = convert_html(&html, "https://x.test/", &options).unwrap();
+        assert!(r.content.contains("first link [1]"), "{}", r.content);
+        let urls: Vec<_> = r
+            .references
+            .iter()
+            .map(|r| (r.index, r.url.as_str()))
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                (1, "https://example.com/first"),
+                (2, "https://example.com/second")
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_window_ignores_a_url_that_is_only_text_prefix() {
+        // Literal text mentions a URL that is a prefix of a real link. The link
+        // itself is cut off by the budget, so it must not be listed.
+        let filler = "lorem ipsum dolor sit amet ".repeat(300);
+        let html = format!(
+            r#"<html><body><article><p>See https://example.com/doc/index.html for more.</p>
+            <p>{filler}</p><p><a href="https://example.com/doc">the doc</a></p></article></body></html>"#
+        );
+        let options = FetchOptions {
+            content_type: ContentType::Markdown,
+            max_tokens: Some(60),
+            ..FetchOptions::default()
+        };
+        let r = convert_html(&html, "https://x.test/", &options).unwrap();
+        assert!(r.content.contains("index.html"), "{}", r.content);
+        assert!(r.references.is_empty(), "refs: {:?}", r.references);
+    }
+
+    /// No budget, but an offset: the link before the window is not in the text
+    /// the caller gets, so its URL must not be listed.
+    #[test]
+    fn an_unbudgeted_window_does_not_list_a_link_before_the_offset() {
+        let html = r#"<html><body><article>
+            <p>Read <a href="https://example.com/before">the early link</a> first.</p>
+            <p>Then the rest of the page goes on, with <a href="https://example.com/after">the later link</a>.</p>
+            </article></body></html>"#;
+        let whole = convert_html(html, "https://x.test/", &FetchOptions::default()).unwrap();
+        let start = whole.content.find("Then the").expect("second paragraph");
+        let options = FetchOptions {
+            offset: start,
+            ..FetchOptions::default()
+        };
+        let r = convert_html(html, "https://x.test/", &options).unwrap();
+        assert!(r.content.contains("later link [2]"), "{}", r.content);
+        assert!(!r.content.contains("early link"), "{}", r.content);
+        let urls: Vec<_> = r.references.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://example.com/after"]);
+    }
+
+    /// A link nested in a link (here through a table) must not leak the
+    /// converter's delimiters into the text, the markdown, or a reference's text.
+    #[test]
+    fn nested_anchors_leak_no_control_characters() {
+        let html = r#"<html><body><article><p>Go <a href="https://x.test/a"><table><tr><td><a href="https://x.test/b">inner</a></td></tr></table>outer</a> now.</p></article></body></html>"#;
+        let clean = |s: &str| s.chars().all(|c| c >= ' ' || c == '\n' || c == '\t');
+        for content_type in [
+            ContentType::Text,
+            ContentType::Markdown,
+            ContentType::Structured,
+        ] {
+            let options = FetchOptions {
+                content_type,
+                ..FetchOptions::default()
+            };
+            let r = convert_html(html, "https://x.test/", &options).unwrap();
+            assert!(clean(&r.content), "{content_type:?}: {:?}", r.content);
+            assert!(
+                r.content.contains("inner"),
+                "{content_type:?}: {}",
+                r.content
+            );
+            assert!(
+                r.content.contains("outer"),
+                "{content_type:?}: {}",
+                r.content
+            );
+            // The inner link is not a second link: only the outer one is listed.
+            let urls: Vec<_> = r.references.iter().map(|r| r.url.as_str()).collect();
+            assert_eq!(urls, vec!["https://x.test/a"], "{content_type:?}");
+            for reference in &r.references {
+                assert!(clean(&reference.text), "{:?}", reference);
+            }
+        }
+    }
+
+    #[test]
+    fn structured_budget_lists_only_references_in_kept_blocks() {
+        let filler = "lorem ipsum dolor sit amet ".repeat(300);
+        let html = format!(
+            r##"<html><body><article>
+            <p>Values have exactly one owner.<sup><a href="#cite_note-1">[1]</a></sup></p>
+            <p>{filler} <a href="https://example.com/late">late</a></p>
+            </article></body></html>"##
+        );
+        let options = FetchOptions {
+            content_type: ContentType::Structured,
+            max_tokens: Some(80),
+            ..FetchOptions::default()
+        };
+        let r = convert_html(&html, "https://x.test/", &options).unwrap();
+        assert!(r.content.contains("owner.[1]"), "{}", r.content);
+        assert!(!r.content.contains("example.com"), "{}", r.content);
+        assert!(r.references.is_empty(), "refs: {:?}", r.references);
     }
 
     #[test]
     fn a_page_with_text_is_ok() {
         let html = "<html><body><article><p>Real words here.</p></article></body></html>";
-        let r = convert_html(html, "https://x.test/", &FetchOptions::default());
+        let r = convert_html(html, "https://x.test/", &FetchOptions::default()).unwrap();
         assert_eq!(r.status, ContentStatus::Ok);
+    }
+
+    fn options(max_tokens: Option<usize>, offset: usize, grep: Option<&str>) -> FetchOptions {
+        FetchOptions {
+            max_tokens,
+            offset,
+            grep: grep.map(str::to_string),
+            ..FetchOptions::default()
+        }
+    }
+
+    /// `max_tokens: 0` used to return one character flagged as truncated, since
+    /// the window always makes one character of progress. It is refused now.
+    #[test]
+    fn a_zero_token_budget_is_refused() {
+        let html = "<html><body><article><p>Some words.</p></article></body></html>";
+        let err = convert_html(html, "https://x.test/", &options(Some(0), 0, None)).unwrap_err();
+        assert_eq!(err, OptionsError::ZeroMaxTokens);
+        assert_eq!(
+            options(Some(0), 0, None).validate(),
+            Err(OptionsError::ZeroMaxTokens)
+        );
+        assert!(options(Some(1), 0, None).validate().is_ok());
+        assert!(options(None, 0, None).validate().is_ok());
+    }
+
+    /// An invalid pattern is an error the caller can act on, not text that
+    /// reads as a successful result.
+    #[test]
+    fn an_invalid_grep_pattern_is_an_error_not_content() {
+        let html = "<html><body><article><p>Some words.</p></article></body></html>";
+        let err =
+            convert_html(html, "https://x.test/", &options(None, 0, Some("([a-"))).unwrap_err();
+        match err {
+            OptionsError::InvalidPattern { pattern, reason } => {
+                assert_eq!(pattern, "([a-");
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected InvalidPattern, got {other:?}"),
+        }
+        assert!(options(None, 0, Some("([a-")).validate().is_err());
+        assert!(options(None, 0, Some("rate limit")).validate().is_ok());
+    }
+
+    /// An offset past the end is a request error that names the size of the
+    /// content, not a page that "renders its body with JavaScript".
+    #[test]
+    fn an_offset_past_the_end_names_the_content_size() {
+        let html = "<html><body><article><p>Some words here.</p></article></body></html>";
+        let total = convert_html(html, "https://x.test/", &FetchOptions::default())
+            .unwrap()
+            .total_bytes;
+        let err = convert_html(html, "https://x.test/", &options(None, 999_999, None)).unwrap_err();
+        assert_eq!(
+            err,
+            OptionsError::OffsetPastEnd {
+                offset: 999_999,
+                total_bytes: total
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            format!("offset 999999 is past the end of the content ({total} bytes)")
+        );
+        // The last byte is still inside the content.
+        let last = convert_html(html, "https://x.test/", &options(None, total - 1, None)).unwrap();
+        assert_eq!(last.total_bytes, total);
+    }
+
+    /// Offset zero is always valid: an empty page keeps its own status, and a
+    /// script shell still reports that it needs JavaScript.
+    #[test]
+    fn an_empty_page_still_gets_its_own_status_at_offset_zero() {
+        let empty = convert_html(
+            "<html><body></body></html>",
+            "https://x.test/",
+            &options(None, 0, None),
+        )
+        .unwrap();
+        assert_eq!(empty.status, ContentStatus::Empty);
+
+        let shell =
+            "<html><body><div id=\"root\"></div><script src=\"/app.js\"></script></body></html>";
+        let r = convert_html(shell, "https://spa.test/", &options(None, 0, None)).unwrap();
+        assert_eq!(r.status, ContentStatus::NeedsJs);
+
+        // Past the end of a page with no text, the offset is what is wrong.
+        let err = convert_html(
+            "<html><body></body></html>",
+            "https://x.test/",
+            &options(None, 5, None),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            OptionsError::OffsetPastEnd { total_bytes: 0, .. }
+        ));
+    }
+
+    /// Structured output is addressed by block, not byte, so an offset there is
+    /// ignored rather than checked.
+    #[test]
+    fn structured_output_ignores_the_offset() {
+        let html = "<html><body><article><p>Some words here.</p></article></body></html>";
+        let opts = FetchOptions {
+            content_type: ContentType::Structured,
+            offset: 999_999,
+            ..FetchOptions::default()
+        };
+        assert!(convert_html(html, "https://x.test/", &opts).is_ok());
     }
 }

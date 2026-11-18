@@ -245,3 +245,43 @@ fn mcp_returns_rendered_text_unless_json_is_asked_for() {
     assert_eq!(v["status"], "ok");
     assert_eq!(v["title"], "Doc");
 }
+
+/// Argument mistakes are tool errors that name the problem, and are caught
+/// before any request: the URL here is one the guard would refuse, so a request
+/// would have reported that instead.
+#[test]
+fn mcp_refuses_bad_arguments_before_fetching() {
+    let requests = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fetch","arguments":{"url":"http://169.254.169.254/","max_tokens":0}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fetch","arguments":{"url":"http://169.254.169.254/","grep":"([a-"}}}"#,
+        "\n",
+    );
+    let frames = exchange(requests, &[]);
+
+    let zero = by_id(&frames, 1);
+    assert_eq!(zero["result"]["isError"], true);
+    let text = zero["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("max_tokens"), "{text}");
+
+    let grep = by_id(&frames, 2);
+    assert_eq!(grep["result"]["isError"], true);
+    let text = grep["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("invalid grep pattern"), "{text}");
+}
+
+/// An empty query is refused without asking a provider. Keyless DuckDuckGo is
+/// the default here, so a request would have reached the network.
+#[test]
+fn mcp_refuses_an_empty_search_query() {
+    let requests = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"   "}}}"#,
+        "\n",
+    );
+    let frames = exchange(requests, &[]);
+
+    let call = by_id(&frames, 1);
+    assert_eq!(call["result"]["isError"], true);
+    let text = call["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("must not be empty"), "{text}");
+}

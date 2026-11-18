@@ -179,6 +179,7 @@ fn tools_list() -> Value {
                         },
                         "max_tokens": {
                             "type": "integer",
+                            "minimum": 1,
                             "description": "Cap on output size in estimated tokens (default 6000)"
                         },
                         "offset": {
@@ -287,6 +288,8 @@ async fn handle_tool_call(msg: &Value, config: &Config) -> Result<Value> {
                     insecure: false,
                 },
             };
+            // Refuse a bad budget or pattern before any download.
+            options.validate()?;
             // Same cache as the CLI: an MCP client reading a long page window
             // by window issues one tool call each, so without it every window
             // is another download of the same document.
@@ -301,7 +304,7 @@ async fn handle_tool_call(msg: &Value, config: &Config) -> Result<Value> {
                     page
                 }
             };
-            let result = webfetch::convert_page(page, &options);
+            let result = webfetch::convert_page(page, &options)?;
 
             // Rendered text by default. Returning the whole FetchResult as
             // pretty JSON meant the model paid for escaped newlines and a

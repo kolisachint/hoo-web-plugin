@@ -15,15 +15,28 @@ hoocode exposes them as `ext_webtools_fetch` and `ext_webtools_search`.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `fetch` | `url` (required); `output` (`text` \| `markdown` \| `structured`, default `text`); `max_tokens` (default 6000); `offset`; `outline`; `grep`; `timeout` (seconds, default 10, capped at 8); `json` | Compact: `{url, final_url, title?, content, truncated, next_offset?}`. `json: true`: the whole `FetchResult`. |
-| `search` | `query` (required); `max_results` (default 5); `safe_search` (`on` \| `off`); `timeout` (seconds, default 10, capped at 6); `json` | Compact: `{query, provider, result_count, content}`. `json: true`: the whole `SearchOutput`. |
+| `fetch` | `url` (required); `output` (`text` \| `markdown` \| `structured`, default `text`); `max_tokens` (default 6000, at least 1); `offset`; `outline`; `grep`; `timeout` (seconds, default 10, capped at 8); `json` | Compact: `{url, final_url, title?, content, truncated, next_offset?}`. `json: true`: the whole `FetchResult`. |
+| `search` | `query` (required, not empty); `max_results` (default 5); `safe_search` (`on` \| `off`); `timeout` (seconds, default 12, capped at 12); `json` | Compact: `{query, provider, result_count, content}`. `json: true`: the whole `SearchOutput`. |
 
-Argument names and defaults match the webtools MCP server (`src/mcp.rs`). Invalid
-arguments return `invalid-args`. hoocode traps a tool call at 30 seconds, so the
+Argument names and defaults match the webtools MCP server (`src/mcp.rs`), except
+the search timeout: 12 seconds here (capped at 12), 10 in the MCP server. Invalid
+arguments return `invalid-args`. A `max_tokens` of 0, a `grep` pattern that does not
+compile, an empty or blank `query`, and an unknown `output` or `safe_search` are
+refused before any request is made. An `offset` at or past the end of the page is
+only known once the page is fetched, so it is refused after the fetch, and the
+message gives the page size. hoocode traps a tool call at 30 seconds, so the
 component runs each call under a 25-second budget: the whole fetch (redirects and
 retries included) or the whole search (fallback provider included) stops at that
-point. A fallback is tried only if at least 8 seconds of budget remain. A page with no extractable text, or a blocked
-search, returns a failure with the reason in the message.
+point.
+
+A search with a fallback configured gives the primary at most 16 seconds. That
+keeps the last 9 seconds of the call for the fallback: 8 seconds is the minimum it
+needs to start, and the extra second is slack for a primary that returns a little
+after its deadline. A slow or timing-out primary therefore cannot starve the
+fallback, at the cost of a fallback that starts later and gets less time. The
+fallback is tried if at least 8 seconds are left once the primary has returned.
+A page with no extractable text, or a blocked search, returns a failure with the
+reason in the message.
 
 The skill `skills/web` tells the model when to use each tool and how to keep
 budgets small.

@@ -1956,7 +1956,10 @@ name = "webtools-core"
 version = "0.7.1"
 dependencies = [
  "anyhow",
+ "brotli",
+ "brotli-decompressor",
  "encoding_rs",
+ "flate2",
  "once_cell",
  "regex",
  "reqwest",
