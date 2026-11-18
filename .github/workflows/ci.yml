@@ -20,6 +20,86 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  # Releases ship macOS and Windows binaries, so a platform-specific break has
+  # to fail here rather than at release time. Compile-only: the test suite is
+  # platform-independent and already runs above.
+  cross-compile:
+    name: Check ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
+  # The libraries are published to crates.io, so the declared `rust-version`
+  # has to be one they actually build on.
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from the manifest
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --locked
+
+  # The libraries build for wasm32-wasip2 with the `wasi` feature (WASI 0.2
+  # `wasi:http`, no native HTTP stack). Build and lint only: a component host
+  # runs them, so there is no test run here.
+  wasm:
+    name: wasm32-wasip2 (wasi feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add the wasm target
+        run: rustup target add wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build -p webtools-core -p webtools-fetch -p webtools-search --target wasm32-wasip2 --no-default-features --features wasi --locked
+      - name: Clippy
+        run: cargo clippy -p webtools-core -p webtools-fetch -p webtools-search --target wasm32-wasip2 --no-default-features --features wasi --locked -- -D warnings
+
+  # The webtools plugin's WASI component (plugin/). Built with plugin/build.sh,
+  # uploaded, and compared byte for byte with the committed
+  # plugin/dev.hoocode/extension.wasm. The toolchain is pinned: the bytes depend
+  # on the rustc version, so a move of `stable` would fail this job. When the
+  # pin changes or the component changes, rebuild and commit the artifact.
+  plugin:
+    name: plugin component
+    runs-on: ubuntu-latest
+    env:
+      # build.sh builds here, so the cache below must cover this directory.
+      WEBTOOLS_TARGET_DIR: ${{ runner.temp }}/webtools-plugin-target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Add the wasm target
+        run: rustup target add wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugin/component -> ${{ runner.temp }}/webtools-plugin-target
+      - name: Build the component
+        run: plugin/build.sh
+      - name: Upload the component
+        uses: actions/upload-artifact@v4
+        with:
+          name: webtools-extension-wasm
+          path: plugin/dev.hoocode/extension.wasm
+      - name: Compare with the committed component
+        run: git diff --exit-code plugin/dev.hoocode/extension.wasm
