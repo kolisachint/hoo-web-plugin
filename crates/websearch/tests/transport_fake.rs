@@ -141,3 +141,17 @@ async fn transient_failure_is_retried_by_duckduckgo() {
         .expect("a connect failure is retried");
     assert_eq!(fake.seen().len(), 2);
 }
+
+/// An empty or blank query is refused before any provider is asked. Tavily
+/// answered such a request with a 400, which cost a call and a fallback.
+#[tokio::test]
+async fn an_empty_query_is_refused_before_any_request() {
+    for query in ["", "   \t\n"] {
+        let fake = Fake::new(vec![]);
+        let err = websearch::run_search_with(&fake, options(query))
+            .await
+            .expect_err("an empty query must not be searched");
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+        assert!(fake.seen().is_empty(), "a request was sent for {query:?}");
+    }
+}

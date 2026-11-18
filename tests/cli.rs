@@ -1124,7 +1124,7 @@ fn a_pattern_that_matches_nothing_says_so() {
 }
 
 /// An unusable pattern is the caller's to fix, so say which part was rejected
-/// rather than returning the page as though nothing was asked.
+/// and fail, rather than returning the page as though nothing was asked.
 #[test]
 fn an_invalid_pattern_is_reported_not_ignored() {
     let path = write_file("handbook.html", &sectioned_doc());
@@ -1142,8 +1142,11 @@ fn an_invalid_pattern_is_reported_not_ignored() {
         None,
     );
 
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("invalid grep pattern"), "{err}");
+    assert!(err.contains("(unclosed"), "{err}");
     let text = stdout(&out);
-    assert!(text.contains("invalid search pattern"), "{text}");
     assert!(!text.contains("Sentence 1 of the Installation"), "{text}");
 }
 
@@ -1192,4 +1195,52 @@ fn a_fetch_without_grep_carries_no_matches_field() {
     );
 
     assert!(!stdout(&out).contains("\"matches\""));
+}
+
+// --- argument checks --------------------------------------------------------
+
+/// `--max-tokens 0` used to print one character, flagged as truncated.
+#[test]
+fn a_zero_token_budget_is_refused() {
+    let path = write_file("zero.html", DOC);
+    let out = run(
+        &[
+            "fetch",
+            "--from-file",
+            path.to_str().unwrap(),
+            "--url",
+            "https://docs.test/",
+            "--max-tokens",
+            "0",
+        ],
+        &[],
+        None,
+    );
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("max_tokens"), "{}", stderr(&out));
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+}
+
+/// An offset past the end names the size of the content. It used to be reported
+/// as a page that renders with JavaScript.
+#[test]
+fn an_offset_past_the_end_names_the_content_size() {
+    let path = write_file("past-end.html", DOC);
+    let out = run(
+        &[
+            "fetch",
+            "--from-file",
+            path.to_str().unwrap(),
+            "--url",
+            "https://docs.test/",
+            "--offset",
+            "999999",
+        ],
+        &[],
+        None,
+    );
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("offset 999999 is past the end"), "{err}");
+    assert!(!err.contains("JavaScript"), "{err}");
 }
