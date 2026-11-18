@@ -12,12 +12,13 @@ use scraper::node::Node;
 use scraper::Html;
 
 use super::text::RefCollector;
+use super::{push_citation, push_literal, resolve_citations};
 use crate::extract;
 use crate::types::UrlReference;
 
 fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
     match node.value() {
-        Node::Text(t) => out.push_str(&t[..]),
+        Node::Text(t) => push_literal(out, &t[..]),
         Node::Element(el) => {
             let name = el.name();
             if super::is_skippable(name) {
@@ -49,8 +50,8 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
                 let inner = inner.trim().to_string();
                 match el.attr("href").and_then(|href| refs.resolve(href)) {
                     Some(url) => {
-                        refs.index_for(url.clone(), &inner);
-                        out.push_str(&format!("[{inner}]({url})"));
+                        let idx = refs.index_for(url.clone(), &inner);
+                        push_citation(out, idx, &format!("[{inner}]({url})"));
                     }
                     None => out.push_str(&inner),
                 }
@@ -83,8 +84,9 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
     }
 }
 
-/// Convert a parsed document to markdown, also returning the links it contains.
-pub fn markdown_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
+/// The markdown walk's working string, still carrying its link delimiters, and
+/// the references it collected. See [`super::text::text_working`].
+pub(crate) fn markdown_working(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
     let root = match extract::content_root(doc) {
         Some(el) => el,
         None => return (String::new(), Vec::new()),
@@ -95,6 +97,12 @@ pub fn markdown_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReferen
         walk(child, &mut out, &mut refs);
     }
     (out, refs.references)
+}
+
+/// Convert a parsed document to markdown, also returning the links it contains.
+pub fn markdown_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
+    let (working, references) = markdown_working(doc, base_url);
+    (resolve_citations(&working).0, references)
 }
 
 /// [`markdown_with_refs`] for callers holding raw HTML.

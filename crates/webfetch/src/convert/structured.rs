@@ -8,12 +8,15 @@
 //! shape. Reading it back off flat text could not tell a heading from a
 //! sentence, which made "structured" no more structured than `text`.
 
+use std::collections::BTreeSet;
+
 use ego_tree::NodeRef;
 use scraper::node::Node;
 use scraper::{ElementRef, Html};
 use serde::{Deserialize, Serialize};
 
 use super::text::RefCollector;
+use super::{push_citation, push_literal, resolve_citations};
 use crate::compress::compress_text;
 use crate::extract;
 use crate::types::UrlReference;
@@ -70,7 +73,7 @@ fn block_kind(name: &str) -> Option<(BlockKind, Option<u8>)> {
 /// or the walk ends, so nothing is silently dropped.
 fn walk(node: NodeRef<Node>, blocks: &mut Vec<Block>, loose: &mut String, refs: &mut RefCollector) {
     match node.value() {
-        Node::Text(t) => loose.push_str(&t[..]),
+        Node::Text(t) => push_literal(loose, &t[..]),
         Node::Element(el) => {
             let name = el.name();
             if super::is_skippable(name) {
@@ -78,14 +81,17 @@ fn walk(node: NodeRef<Node>, blocks: &mut Vec<Block>, loose: &mut String, refs: 
             }
 
             if name == "a" {
-                let inner = ElementRef::wrap(node)
+                let raw = ElementRef::wrap(node)
                     .map(|e| e.text().collect::<String>())
                     .unwrap_or_default();
-                let inner = compress_text(&inner);
+                let mut literal = String::new();
+                push_literal(&mut literal, &raw);
+                let inner = compress_text(&literal);
                 loose.push_str(&inner);
                 if let Some(url) = el.attr("href").and_then(|h| refs.resolve(h)) {
                     let idx = refs.index_for(url, &inner);
-                    loose.push_str(&format!(" [{idx}]"));
+                    loose.push(' ');
+                    push_citation(loose, idx, &format!("[{idx}]"));
                 }
                 return;
             }
@@ -131,13 +137,26 @@ fn flush(blocks: &mut Vec<Block>, loose: &mut String) {
 
 /// Build a structured document from a parsed page.
 pub fn structured(doc: &Html, base_url: &str) -> StructuredDoc {
+    structured_with_citations(doc, base_url).0
+}
+
+/// [`structured`], also reporting for each block the reference indices its
+/// text cites. Budgeting needs this to keep only the references whose blocks
+/// survive; the block text itself is what the consumer reads.
+pub(crate) fn structured_with_citations(
+    doc: &Html,
+    base_url: &str,
+) -> (StructuredDoc, Vec<BTreeSet<usize>>) {
     let root = match extract::content_root(doc) {
         Some(el) => el,
         None => {
-            return StructuredDoc {
-                blocks: Vec::new(),
-                references: Vec::new(),
-            }
+            return (
+                StructuredDoc {
+                    blocks: Vec::new(),
+                    references: Vec::new(),
+                },
+                Vec::new(),
+            )
         }
     };
 
@@ -149,10 +168,20 @@ pub fn structured(doc: &Html, base_url: &str) -> StructuredDoc {
     }
     flush(&mut blocks, &mut loose);
 
-    StructuredDoc {
-        blocks,
-        references: refs.references,
+    let mut cited = Vec::with_capacity(blocks.len());
+    for block in &mut blocks {
+        let (text, citations) = resolve_citations(&block.text);
+        block.text = text;
+        cited.push(citations.iter().map(|c| c.index).collect());
     }
+
+    (
+        StructuredDoc {
+            blocks,
+            references: refs.references,
+        },
+        cited,
+    )
 }
 
 /// [`structured`] for callers holding raw HTML.

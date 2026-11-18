@@ -235,7 +235,8 @@ fn convert_html_body(
     let converted = convert::convert_parsed(&doc, source_url, options.content_type);
     // Drop a leading body line that merely repeats the title (common when the
     // title was derived from the page's first <h1>, which also opens the body).
-    let body_text = strip_duplicate_title(&title, converted.content);
+    let (body_text, citations) =
+        strip_duplicate_title(&title, converted.content, converted.citations);
 
     // The outline is a different view of the same document, not a slice of it:
     // it replaces the body with a map of where the body's sections are. Built
@@ -311,7 +312,14 @@ fn convert_html_body(
         // "truncate the body, then keep the references it still cites".
         ContentType::Text => {
             let windowed = compress::window_from(&body_text, options.offset);
-            let fitted = refs::fit_to_budget(windowed, &converted.references, options.max_tokens);
+            let start = body_text.len() - windowed.len();
+            let citations = refs::rebase(&citations, start);
+            let fitted = refs::fit_to_budget(
+                windowed,
+                &citations,
+                &converted.references,
+                options.max_tokens,
+            );
             let references = converted
                 .references
                 .into_iter()
@@ -320,15 +328,19 @@ fn convert_html_body(
             let window = Window::measured(&body_text, options.offset, fitted.body_consumed);
             (fitted.content, references, window)
         }
-        // Markdown carries its links inline, so there are no markers to match
-        // on: keep the references whose URL survives in the truncated text.
+        // Markdown carries its links inline, so the references are the links
+        // whose markers survive the window, not the URLs found in its text.
         ContentType::Markdown => {
-            let (content, window) = budget_plain(&body_text, options);
+            let windowed = compress::window_from(&body_text, options.offset);
+            let start = body_text.len() - windowed.len();
+            let (content, consumed) = truncate_window(windowed, options.max_tokens);
+            let cited = refs::cited_within(&refs::rebase(&citations, start), consumed);
             let references = converted
                 .references
                 .into_iter()
-                .filter(|r| content.contains(&r.url))
+                .filter(|r| cited.contains(&r.index))
                 .collect();
+            let window = Window::measured(&body_text, options.offset, consumed);
             (content, references, window)
         }
         // The content is JSON; truncating its text would produce invalid JSON,
@@ -362,15 +374,16 @@ fn convert_html_body(
 /// reporting the slice of the document it covers.
 fn budget_plain(text: &str, options: &FetchOptions) -> (String, Window) {
     let windowed = compress::window_from(text, options.offset);
-    match options.max_tokens {
-        Some(max) => {
-            let (content, consumed) = compress::truncate_to_tokens_at(windowed, max);
-            (content, Window::measured(text, options.offset, consumed))
-        }
-        None => (
-            windowed.to_string(),
-            Window::measured(text, options.offset, windowed.len()),
-        ),
+    let (content, consumed) = truncate_window(windowed, options.max_tokens);
+    (content, Window::measured(text, options.offset, consumed))
+}
+
+/// Cut an already-windowed text to the token budget. Returns the text and how
+/// many of its bytes it consumed.
+fn truncate_window(windowed: &str, max_tokens: Option<usize>) -> (String, usize) {
+    match max_tokens {
+        Some(max) => compress::truncate_to_tokens_at(windowed, max),
+        None => (windowed.to_string(), windowed.len()),
     }
 }
 
@@ -387,21 +400,18 @@ fn budget_structured(
 ) -> (String, Vec<UrlReference>) {
     use convert::structured::{to_json, StructuredDoc};
 
-    let parsed = convert::structured::structured(doc, source_url);
+    let (parsed, cited_blocks) = convert::structured::structured_with_citations(doc, source_url);
 
     let render = |n: usize| -> (String, Vec<UrlReference>) {
         let blocks = parsed.blocks[..n].to_vec();
-        let cited = refs::cited_indices(
-            &blocks
-                .iter()
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" "),
-        );
         let references: Vec<UrlReference> = parsed
             .references
             .iter()
-            .filter(|r| cited.contains(&r.index))
+            .filter(|r| {
+                cited_blocks[..n]
+                    .iter()
+                    .any(|cited| cited.contains(&r.index))
+            })
             .cloned()
             .collect();
         let json = to_json(&StructuredDoc {
@@ -498,21 +508,24 @@ fn undecodable_charset(header: Option<&str>, doc: &Html) -> Option<String> {
 /// When the title was derived from the page's first heading, the body repeats
 /// it as its opening line. Drop that leading line when it normalizes to the
 /// same text as `title`. Conservative: only an exact normalized match of the
-/// *first* line is removed, so genuine content is never lost.
-fn strip_duplicate_title(title: &str, content: String) -> String {
+/// *first* line is removed, so genuine content is never lost. Markers in the
+/// removed line go with it, and the rest are moved to the new offsets.
+fn strip_duplicate_title(
+    title: &str,
+    content: String,
+    citations: Vec<refs::Citation>,
+) -> (String, Vec<refs::Citation>) {
     if title.is_empty() {
-        return content;
+        return (content, citations);
     }
     let mut parts = content.splitn(2, '\n');
     let first = parts.next().unwrap_or("");
     if compress::compress_text(first) == compress::compress_text(title) {
-        return parts
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('\n')
-            .to_string();
+        let rest = parts.next().unwrap_or("").trim_start_matches('\n');
+        let start = content.len() - rest.len();
+        return (rest.to_string(), refs::rebase(&citations, start));
     }
-    content
+    (content, citations)
 }
 
 /// Convert an already-fetched page according to `options`.
@@ -579,6 +592,120 @@ mod tests {
         let r = convert_html(html, "https://spa.test/", &FetchOptions::default());
         assert_eq!(r.status, ContentStatus::NeedsJs);
         assert!(r.status.is_failure());
+    }
+
+    /// A page whose only literal `[1]` is a footnote (a same-page `#cite_note`
+    /// anchor, which earns no reference), followed by filler and then a real
+    /// link that is reference #1. The footnote must never pull that link in.
+    fn footnote_page(filler_words: usize) -> String {
+        let filler = "lorem ipsum dolor sit amet ".repeat(filler_words);
+        format!(
+            r##"<html><head><title>Ownership</title></head><body><article>
+            <p>Values have exactly one owner.<sup class="reference"><a href="#cite_note-1">[1]</a></sup> Values are moved.</p>
+            <p>{filler}</p>
+            <p>Read the <a href="https://example.com/first">first link</a> and the <a href="https://example.com/second">second link</a>.</p>
+            </article></body></html>"##
+        )
+    }
+
+    #[test]
+    fn literal_footnote_text_does_not_pull_in_a_reference() {
+        let html = footnote_page(3);
+        let r = convert_html(&html, "https://x.test/", &FetchOptions::default());
+        assert!(r.content.contains("owner.[1] Values"), "{}", r.content);
+        let urls: Vec<_> = r
+            .references
+            .iter()
+            .map(|r| (r.index, r.url.as_str()))
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                (1, "https://example.com/first"),
+                (2, "https://example.com/second")
+            ]
+        );
+    }
+
+    #[test]
+    fn literal_footnote_text_in_a_budgeted_window_lists_no_reference() {
+        // The budget cuts the page before the real links: the only `[1]` in the
+        // returned window is the footnote, so the list must be empty.
+        let html = footnote_page(300);
+        let options = FetchOptions {
+            max_tokens: Some(120),
+            ..FetchOptions::default()
+        };
+        let r = convert_html(&html, "https://x.test/", &options);
+        assert!(r.content.contains("owner.[1]"), "{}", r.content);
+        assert!(r.references.is_empty(), "refs: {:?}", r.references);
+        assert!(!r.content.contains("References:"), "{}", r.content);
+    }
+
+    #[test]
+    fn a_window_reports_only_the_references_it_contains() {
+        // Start the window at the real links: they are renumbered from the
+        // document, so the list must name them by their document indices.
+        let html = footnote_page(300);
+        let whole = convert_html(&html, "https://x.test/", &FetchOptions::default());
+        let start = whole.content.find("Read the").expect("link paragraph");
+        let options = FetchOptions {
+            offset: start,
+            ..FetchOptions::default()
+        };
+        let r = convert_html(&html, "https://x.test/", &options);
+        assert!(r.content.contains("first link [1]"), "{}", r.content);
+        let urls: Vec<_> = r
+            .references
+            .iter()
+            .map(|r| (r.index, r.url.as_str()))
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                (1, "https://example.com/first"),
+                (2, "https://example.com/second")
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_window_ignores_a_url_that_is_only_text_prefix() {
+        // Literal text mentions a URL that is a prefix of a real link. The link
+        // itself is cut off by the budget, so it must not be listed.
+        let filler = "lorem ipsum dolor sit amet ".repeat(300);
+        let html = format!(
+            r#"<html><body><article><p>See https://example.com/doc/index.html for more.</p>
+            <p>{filler}</p><p><a href="https://example.com/doc">the doc</a></p></article></body></html>"#
+        );
+        let options = FetchOptions {
+            content_type: ContentType::Markdown,
+            max_tokens: Some(60),
+            ..FetchOptions::default()
+        };
+        let r = convert_html(&html, "https://x.test/", &options);
+        assert!(r.content.contains("index.html"), "{}", r.content);
+        assert!(r.references.is_empty(), "refs: {:?}", r.references);
+    }
+
+    #[test]
+    fn structured_budget_lists_only_references_in_kept_blocks() {
+        let filler = "lorem ipsum dolor sit amet ".repeat(300);
+        let html = format!(
+            r##"<html><body><article>
+            <p>Values have exactly one owner.<sup><a href="#cite_note-1">[1]</a></sup></p>
+            <p>{filler} <a href="https://example.com/late">late</a></p>
+            </article></body></html>"##
+        );
+        let options = FetchOptions {
+            content_type: ContentType::Structured,
+            max_tokens: Some(80),
+            ..FetchOptions::default()
+        };
+        let r = convert_html(&html, "https://x.test/", &options);
+        assert!(r.content.contains("owner.[1]"), "{}", r.content);
+        assert!(!r.content.contains("example.com"), "{}", r.content);
+        assert!(r.references.is_empty(), "refs: {:?}", r.references);
     }
 
     #[test]

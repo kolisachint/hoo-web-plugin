@@ -13,6 +13,7 @@ use scraper::node::Node;
 use scraper::{ElementRef, Html};
 use url::Url;
 
+use super::{push_citation, push_literal, resolve_citations};
 use crate::extract;
 use crate::types::UrlReference;
 
@@ -107,7 +108,7 @@ const CELL_SEPARATOR: &str = " | ";
 
 fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
     match node.value() {
-        Node::Text(t) => out.push_str(&t[..]),
+        Node::Text(t) => push_literal(out, &t[..]),
         Node::Element(el) => {
             let name = el.name();
             if super::is_skippable(name) {
@@ -130,7 +131,8 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
                 if let Some(href) = el.attr("href") {
                     if let Some(resolved) = refs.resolve(href) {
                         let idx = refs.index_for(resolved, &inner);
-                        out.push_str(&format!(" [{}]", idx));
+                        out.push(' ');
+                        push_citation(out, idx, &format!("[{idx}]"));
                     }
                 }
                 return;
@@ -163,12 +165,10 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
     }
 }
 
-/// Convert a parsed HTML document to reference-style plain text.
-///
-/// Returns the body text (with inline `[N]` markers) and the ordered list of
-/// references. The returned text does **not** include the rendered
-/// "References:" block — see [`render_references`] to append it.
-pub fn text_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
+/// The text walk's working string, still carrying its marker delimiters, and
+/// the references it collected. Callers that need the markers' positions run
+/// [`resolve_citations`] on it after any whitespace compression.
+pub(crate) fn text_working(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
     let root: ElementRef = match extract::content_root(doc) {
         Some(el) => el,
         None => return (String::new(), Vec::new()),
@@ -180,6 +180,16 @@ pub fn text_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>)
         walk(child, &mut out, &mut refs);
     }
     (out, refs.references)
+}
+
+/// Convert a parsed HTML document to reference-style plain text.
+///
+/// Returns the body text (with inline `[N]` markers) and the ordered list of
+/// references. The returned text does **not** include the rendered
+/// "References:" block — see [`render_references`] to append it.
+pub fn text_with_refs(doc: &Html, base_url: &str) -> (String, Vec<UrlReference>) {
+    let (working, references) = text_working(doc, base_url);
+    (resolve_citations(&working).0, references)
 }
 
 /// [`text_with_refs`] for callers holding raw HTML. Parses the document; prefer
