@@ -2,8 +2,9 @@
 //! response-body cap, and the retry classification. Both paths previously
 //! carried their own copy of the last two and had drifted apart — search read
 //! bodies without any cap at all.
-
-use reqwest::{Response, StatusCode};
+//!
+//! Nothing here touches a concrete HTTP client; the transport-level pieces live
+//! in [`crate::transport`].
 
 /// The user agent both paths send.
 ///
@@ -23,9 +24,14 @@ pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36
 /// bounds a decompression bomb.
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
+/// Cap on a 4xx or 5xx body (64 KiB). Error bodies only feed a message, and
+/// the provider's own explanation fits well inside this.
+pub const ERROR_BODY_CAP: usize = 64 * 1024;
+
 /// Append as much of `chunk` to `buf` as fits under `max`. Returns `true` once
 /// the cap is reached (the body is truncated and the caller should stop).
-fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
+#[cfg_attr(not(any(feature = "native", feature = "wasi")), allow(dead_code))]
+pub(crate) fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
     let remaining = max.saturating_sub(buf.len());
     if chunk.len() >= remaining {
         buf.extend_from_slice(&chunk[..remaining]);
@@ -36,55 +42,73 @@ fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
     }
 }
 
-/// Read a response body, streaming chunks with a running byte cap so an
-/// oversized body is bounded before it is ever parsed. The `bool` in the error
-/// reports whether the read failure is transient (worth retrying).
-///
-/// Decodes as UTF-8. Use [`read_body_capped_bytes`] when the response's declared
-/// charset matters.
-pub async fn read_body_capped(resp: Response) -> Result<String, (anyhow::Error, bool)> {
-    let bytes = read_body_capped_bytes(resp).await?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-/// [`read_body_capped`] without the decoding step, for callers that need to
-/// apply the response's declared charset themselves.
-pub async fn read_body_capped_bytes(mut resp: Response) -> Result<Vec<u8>, (anyhow::Error, bool)> {
-    let mut buf: Vec<u8> = Vec::new();
-    // Honour Content-Length to pre-size, but never trust it past the cap.
-    if let Some(len) = resp.content_length() {
-        buf.reserve(len.min(MAX_BODY_BYTES as u64) as usize);
-    }
-    loop {
-        match resp.chunk().await {
-            Ok(Some(chunk)) => {
-                if push_capped(&mut buf, &chunk, MAX_BODY_BYTES) {
-                    break;
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                let transient = e.is_timeout();
-                return Err((e.into(), transient));
-            }
-        }
-    }
-    Ok(buf)
-}
-
-/// Is a send/connect failure worth retrying?
-pub fn transient_send_error(e: &reqwest::Error) -> bool {
-    e.is_timeout() || e.is_connect() || e.is_request()
-}
-
 /// Is a response status worth retrying? Server errors and explicit throttling.
-pub fn transient_status(status: StatusCode) -> bool {
-    status.is_server_error() || status.as_u16() == 429
+pub fn transient_status(status: u16) -> bool {
+    (500..600).contains(&status) || status == 429
+}
+
+/// A status code and its reason phrase, as `404 Not Found`. A code with no
+/// standard phrase is shown as the number alone.
+///
+/// Native builds take the phrase from reqwest's `StatusCode`, so every
+/// registered code is covered. The WASI build has no HTTP crate of its own and
+/// uses a table of the codes the libraries meet in practice.
+pub fn status_text(status: u16) -> String {
+    #[cfg(feature = "native")]
+    let reason = reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|code| code.canonical_reason());
+    #[cfg(not(feature = "native"))]
+    let reason = wasi_reason(status);
+    match reason {
+        Some(reason) => format!("{status} {reason}"),
+        None => status.to_string(),
+    }
+}
+
+#[cfg(not(feature = "native"))]
+fn wasi_reason(status: u16) -> Option<&'static str> {
+    Some(match status {
+        200 => "OK",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_text_names_the_reason_phrase() {
+        assert_eq!(status_text(404), "404 Not Found");
+        assert_eq!(status_text(401), "401 Unauthorized");
+        // No standard phrase: the number alone.
+        assert_eq!(status_text(799), "799");
+    }
 
     #[test]
     fn push_capped_truncates_oversized_chunk() {
@@ -118,9 +142,11 @@ mod tests {
 
     #[test]
     fn transient_status_covers_5xx_and_429() {
-        assert!(transient_status(StatusCode::INTERNAL_SERVER_ERROR));
-        assert!(transient_status(StatusCode::TOO_MANY_REQUESTS));
-        assert!(!transient_status(StatusCode::NOT_FOUND));
-        assert!(!transient_status(StatusCode::FORBIDDEN));
+        assert!(transient_status(500));
+        assert!(transient_status(503));
+        assert!(transient_status(429));
+        assert!(!transient_status(404));
+        assert!(!transient_status(403));
+        assert!(!transient_status(202));
     }
 }

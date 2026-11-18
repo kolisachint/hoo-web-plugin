@@ -1,4 +1,6 @@
-//! Optional configuration from `~/.hoocode/settings.json`.
+//! Optional configuration from `$XDG_CONFIG_HOME/webtools/config.json`, or
+//! `~/.config/webtools/config.json` when `XDG_CONFIG_HOME` is unset. The
+//! `WEBTOOLS_CONFIG` environment variable overrides the path.
 //!
 //! Config loading lives in the binary on purpose. The library crates are
 //! published to crates.io, and a library that reaches into a user's home
@@ -6,10 +8,10 @@
 //! CLI resolves every setting here and hands the libraries fully populated
 //! option structs.
 //!
-//! `settings.json` is shared with other tooling, so this reads only its own
-//! `webtools` section and ignores every other key. A missing file is not an
-//! error: with no configuration at all, `webtools` still works against keyless
-//! DuckDuckGo.
+//! The file holds webtools settings only, at its top level. Unknown keys are
+//! ignored, so a newer file never breaks an older binary. A missing file is not
+//! an error: with no configuration at all, `webtools` still works against
+//! keyless DuckDuckGo.
 //!
 //! Precedence, highest first: command-line flag, environment variable, config
 //! file, built-in default. Environment variables matter as much as the file —
@@ -22,20 +24,16 @@ use serde::Deserialize;
 use websearch::providers::Provider;
 
 /// Overrides the config file location entirely.
-const CONFIG_ENV: &str = "HOOCODE_CONFIG";
-/// Path under the user's home directory when `HOOCODE_CONFIG` is unset.
-const CONFIG_RELATIVE: &str = ".hoocode/settings.json";
+const CONFIG_ENV: &str = "WEBTOOLS_CONFIG";
+/// Directory name under `XDG_CONFIG_HOME` (or `~/.config`).
+const APP_DIR: &str = "webtools";
+/// File name inside the app directory.
+const CONFIG_FILE: &str = "config.json";
 
-/// The `webtools` section of `settings.json`. Unknown keys are ignored so a
-/// file shared with other tools never fails to load here.
+/// The config file. Unknown keys are ignored so a file shared with other tools
+/// never fails to load here.
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
-    #[serde(default)]
-    pub webtools: WebtoolsConfig,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct WebtoolsConfig {
     #[serde(default)]
     pub search: SearchConfig,
     #[serde(default)]
@@ -127,12 +125,18 @@ pub struct FetchConfig {
     pub cache_ttl_secs: Option<u64>,
 }
 
-/// Where the config file would be, if the platform can tell us.
+/// Where the config file lives: `WEBTOOLS_CONFIG`, else
+/// `$XDG_CONFIG_HOME/webtools/config.json`, else `~/.config/webtools/config.json`.
+/// `None` only when there is no override and no home directory.
 pub fn config_path() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os(CONFIG_ENV) {
         return Some(PathBuf::from(explicit));
     }
-    home_dir().map(|home| home.join(CONFIG_RELATIVE))
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".config")))?;
+    Some(base.join(APP_DIR).join(CONFIG_FILE))
 }
 
 /// The user's home directory. `HOME` on Unix, `USERPROFILE` on Windows — the
@@ -231,7 +235,7 @@ impl SearchConfig {
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "searxng needs a base_url: set WEBTOOLS_SEARXNG_URL, or \
-                             webtools.search.providers.searxng.base_url in the config file"
+                             search.providers.searxng.base_url in the config file"
                         )
                     })?;
                 let api_key = env_key(&["WEBTOOLS_SEARXNG_API_KEY"])
@@ -287,7 +291,7 @@ impl SearchConfig {
 fn missing_key(provider: &str, env_name: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "{provider} needs an API key: set {env_name}, or \
-         webtools.search.providers.{provider}.api_key in the config file"
+         search.providers.{provider}.api_key in the config file"
     )
 }
 
@@ -297,17 +301,15 @@ mod tests {
 
     const SAMPLE: &str = r#"{
       "someOtherTool": { "unrelated": true },
-      "webtools": {
-        "search": {
-          "provider": "brave",
-          "fallback": "duckduckgo",
-          "providers": {
-            "brave": { "api_key": "BSA-from-file" },
-            "searxng": { "base_url": "https://searx.internal" }
-          }
-        },
-        "fetch": { "timeout_secs": 20, "max_tokens": 4000 }
-      }
+      "search": {
+        "provider": "brave",
+        "fallback": "duckduckgo",
+        "providers": {
+          "brave": { "api_key": "BSA-from-file" },
+          "searxng": { "base_url": "https://searx.internal" }
+        }
+      },
+      "fetch": { "timeout_secs": 20, "max_tokens": 4000 }
     }"#;
 
     fn sample() -> Config {
@@ -317,28 +319,28 @@ mod tests {
     #[test]
     fn unrelated_sections_are_ignored() {
         let config = sample();
-        assert_eq!(config.webtools.search.provider.as_deref(), Some("brave"));
-        assert_eq!(config.webtools.fetch.timeout_secs, Some(20));
-        assert_eq!(config.webtools.fetch.max_tokens, Some(4000));
+        assert_eq!(config.search.provider.as_deref(), Some("brave"));
+        assert_eq!(config.fetch.timeout_secs, Some(20));
+        assert_eq!(config.fetch.max_tokens, Some(4000));
     }
 
     #[test]
     fn an_empty_file_is_all_defaults() {
         let config: Config = serde_json::from_str("{}").unwrap();
-        assert!(config.webtools.search.provider.is_none());
-        assert!(config.webtools.fetch.ca_certs.is_empty());
+        assert!(config.search.provider.is_none());
+        assert!(config.fetch.ca_certs.is_empty());
     }
 
     #[test]
     fn a_key_from_the_file_builds_a_provider() {
-        let provider = sample().webtools.search.build("brave").unwrap();
+        let provider = sample().search.build("brave").unwrap();
         assert_eq!(provider.label(), "brave");
     }
 
     #[test]
     fn a_provider_without_a_key_is_an_error_not_a_silent_fallback() {
         let config: Config = serde_json::from_str("{}").unwrap();
-        let err = config.webtools.search.build("tavily").unwrap_err();
+        let err = config.search.build("tavily").unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("TAVILY_API_KEY"), "{message}");
     }
@@ -346,14 +348,14 @@ mod tests {
     #[test]
     fn searxng_needs_a_base_url() {
         let config: Config = serde_json::from_str("{}").unwrap();
-        assert!(config.webtools.search.build("searxng").is_err());
-        let provider = sample().webtools.search.build("searxng").unwrap();
+        assert!(config.search.build("searxng").is_err());
+        let provider = sample().search.build("searxng").unwrap();
         assert_eq!(provider.label(), "searxng");
     }
 
     #[test]
     fn unknown_provider_names_are_rejected() {
-        assert!(sample().webtools.search.build("altavista").is_err());
+        assert!(sample().search.build("altavista").is_err());
     }
 
     #[test]
@@ -367,6 +369,6 @@ mod tests {
     fn a_fallback_matching_the_primary_is_dropped() {
         let config = sample();
         let primary = Provider::Duckduckgo;
-        assert!(config.webtools.search.resolve_fallback(&primary).is_none());
+        assert!(config.search.resolve_fallback(&primary).is_none());
     }
 }

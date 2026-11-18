@@ -13,6 +13,34 @@ lockstep semantic versioning across all crates.
 
 ### Added
 
+- **hoocode plugin `webtools`** (`plugin/`). An Agent Plugins 1.0 package with
+  the skill `web` and the WASI component `dev.hoocode/extension.wasm`. The
+  component is `plugin/component`, a guest crate outside the workspace. It
+  exposes `fetch` and `search` (the MCP tools' arguments and defaults) through
+  the `hoocode:extension@0.1.0` contract. Search providers and keys come from
+  the host's `config-get`. `plugin/build.sh` rebuilds the component; the build
+  is reproducible on one checkout and across target directories.
+- **Builds for `wasm32-wasip2` (WASI 0.2 `wasi:http`).** `webtools-core`,
+  `webtools-fetch` and `webtools-search` take a `wasi` feature. It adds
+  `WasiTransport`, which sends each request through `wasi:http/outgoing-handler`
+  as one hop without following redirects. Build with
+  `--no-default-features --features wasi`; the tree then has no tokio, reqwest
+  or rustls. The host enforces SSRF rules, DNS policy and TLS, since this path
+  has no guard and no TLS configuration of its own.
+- **`Transport` seam for HTTP.** `webfetch_core::transport::Transport` sends one
+  hop (`HttpRequest` to `HttpResponse`, no redirects) and waits between retries.
+  `ReqwestTransport` is the native implementation and `WasiTransport` the
+  `wasi:http` one. Callers pass a transport to `webfetch::fetch_with`,
+  `websearch::run_search_with` and each provider's `search_with`; `fetch_page`
+  and `run_search` keep the native path.
+- **Retry backoff waits through the transport.** `Transport::sleep` is the
+  wait between retries, so a host without a tokio runtime can drive the same
+  retry loop. Tokio is an optional dependency behind `native` in each library
+  crate.
+- **CI `wasm` job.** Builds and clippy-lints the three libraries for
+  `wasm32-wasip2 --no-default-features --features wasi`. Delivered as
+  `ci/workflow-updates.patch` until that patch is applied.
+
 - **`fetch --grep <pattern>` finds where a page mentions something.** Paging
   reads a document in order and `--outline` maps it by heading, but neither
   answers "where does this mention rate limiting" on a page whose headings do
@@ -117,6 +145,24 @@ lockstep semantic versioning across all crates.
   the offline path mangled pages the network path handled correctly.
 
 ### Breaking
+
+- **`webfetch_core::http` loses its reqwest helpers.** `read_body_capped`,
+  `read_body_capped_bytes` and `transient_send_error` are removed; the transport
+  reads the body and classifies the send error. `transient_status` takes the
+  status as a `u16` instead of `reqwest::StatusCode`.
+- **The reqwest-backed API needs the default `native` feature.**
+  `FetchOptions::tls`, `SearchOptions::tls`, `webfetch::tls`, `webfetch::guard`,
+  `websearch::tls` and `websearch::providers::ddg::fetch_lite` are compiled only
+  with `native`. Builds with `default-features = false` use `fetch_with`,
+  `run_search_with` and `WasiTransport` instead.
+
+- **Config file moved to `~/.config/webtools/config.json`.** `webtools` no
+  longer reads `~/.hoocode/settings.json` and has no fallback to it. The file
+  now holds the settings at its top level, so the old `webtools` wrapper object
+  is dropped: `webtools.search` becomes `search`, `webtools.fetch` becomes
+  `fetch`. The default directory is `$XDG_CONFIG_HOME/webtools` when that is
+  set. `HOOCODE_CONFIG` is removed; `WEBTOOLS_CONFIG` replaces it as the path
+  override. All environment variables and flags are unchanged.
 
 - `webfetch::types::FetchOptions` gains `grep`, and `FetchResult` gains a
   `matches` vector of `webfetch::grep::Match`. Exhaustive struct literals need

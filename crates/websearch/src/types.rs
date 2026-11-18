@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// The slim reference entry shared with the fetch path.
 pub use crate::providers::Provider;
 pub use crate::refs::Reference;
+#[cfg(feature = "native")]
 pub use crate::tls::TlsConfig;
 
 /// A single search hit, carrying its reference index so the inline body can
@@ -65,6 +66,7 @@ pub struct SearchOptions {
     /// TLS trust configuration (OS store is honoured by default; this carries
     /// the explicit `--ca-cert` / `--insecure` overrides).
     #[serde(default)]
+    #[cfg(feature = "native")]
     pub tls: TlsConfig,
     /// Which backend to query. Defaults to keyless DuckDuckGo Lite so the tool
     /// needs no configuration; credentials are resolved by the caller (the CLI
@@ -84,6 +86,7 @@ impl Default for SearchOptions {
             max_results: Some(5),
             safe_search: None,
             timeout_secs: 10,
+            #[cfg(feature = "native")]
             tls: TlsConfig::default(),
             provider: Provider::default(),
             fallback: None,

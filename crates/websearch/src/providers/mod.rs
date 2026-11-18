@@ -15,13 +15,27 @@ pub mod ddg;
 pub mod searxng;
 pub mod tavily;
 
-use std::time::Duration;
-
-use reqwest::Client;
 use serde::Deserialize;
+use url::Url;
 
-use crate::tls::TlsConfig;
 use crate::types::{SearchOptions, SearchResult, SearchStatus};
+#[cfg(feature = "native")]
+use webfetch_core::transport::ReqwestTransport;
+use webfetch_core::transport::{HttpRequest, HttpResponse, Method, Transport, TransportError};
+
+/// Redirects a search provider follows before giving up. Matches the reqwest
+/// default these providers used before the transport seam existed.
+pub(crate) const MAX_REDIRECTS: usize = 10;
+
+/// Headers that carry a credential. They are dropped when a redirect leaves the
+/// original host, as reqwest does for `Authorization`; the custom key header is
+/// stripped too so a redirect cannot hand a Brave key to another host.
+const CREDENTIAL_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "x-subscription-token",
+];
 
 /// Which backend answers a search, and the credential it needs.
 #[derive(Clone, Default, Deserialize)]
@@ -89,31 +103,91 @@ impl Provider {
         }
     }
 
-    /// Run a query against this backend.
+    /// Run a query against this backend over the native transport.
+    #[cfg(feature = "native")]
     pub async fn search(
         &self,
         options: &SearchOptions,
     ) -> anyhow::Result<(Vec<SearchResult>, SearchStatus)> {
+        let transport = ReqwestTransport::new(&options.tls)?;
+        self.search_with(&transport, options).await
+    }
+
+    /// Run a query against this backend through a caller-supplied transport.
+    pub async fn search_with(
+        &self,
+        transport: &impl Transport,
+        options: &SearchOptions,
+    ) -> anyhow::Result<(Vec<SearchResult>, SearchStatus)> {
         let max = options.max_results.unwrap_or(5);
         match self {
-            Provider::Duckduckgo => ddg::search(options, max).await,
-            Provider::Brave { api_key } => brave::search(options, max, api_key).await,
-            Provider::Tavily { api_key } => tavily::search(options, max, api_key).await,
+            Provider::Duckduckgo => ddg::search_with(transport, options, max).await,
+            Provider::Brave { api_key } => {
+                brave::search_with(transport, options, max, api_key).await
+            }
+            Provider::Tavily { api_key } => {
+                tavily::search_with(transport, options, max, api_key).await
+            }
             Provider::Searxng { base_url, api_key } => {
-                searxng::search(options, max, base_url, api_key.as_deref()).await
+                searxng::search_with(transport, options, max, base_url, api_key.as_deref()).await
             }
         }
     }
 }
 
-/// Build the HTTP client every provider uses: shared user agent, shared TLS
-/// trust configuration, and the caller's timeout.
-pub(crate) fn client(timeout_secs: u64, tls: &TlsConfig) -> anyhow::Result<Client> {
-    let builder = Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .user_agent(webfetch_core::http::USER_AGENT)
-        .gzip(true);
-    Ok(tls.apply(builder)?.build()?)
+/// Send a request, following redirects one hop at a time.
+///
+/// The transport never follows redirects itself, so the providers do it here.
+/// A 3xx without a `Location` is returned as-is. Exceeding `max_redirects` is a
+/// [`TransportError::Other`], which is not transient. A 301/302 on POST, or any
+/// 303, becomes a GET without a body. A hop to another host or scheme drops the
+/// [`CREDENTIAL_HEADERS`].
+pub(crate) async fn send_following(
+    transport: &impl Transport,
+    mut req: HttpRequest,
+    max_redirects: usize,
+) -> Result<HttpResponse, TransportError> {
+    let mut hops = 0usize;
+    loop {
+        let resp = transport.send(req.clone()).await?;
+        if !(300..400).contains(&resp.status) {
+            return Ok(resp);
+        }
+        let Some(location) = resp.header("location").map(str::to_string) else {
+            return Ok(resp);
+        };
+        if hops >= max_redirects {
+            return Err(TransportError::Other(format!(
+                "too many redirects (>{max_redirects})"
+            )));
+        }
+        hops += 1;
+
+        let current = Url::parse(&req.url).map_err(|e| TransportError::Other(e.to_string()))?;
+        let next = current.join(&location).map_err(|e| {
+            TransportError::Other(format!("invalid redirect target `{location}`: {e}"))
+        })?;
+
+        if next.scheme() != current.scheme()
+            || next.host_str() != current.host_str()
+            || next.port_or_known_default() != current.port_or_known_default()
+        {
+            req.headers.retain(|(name, _)| {
+                !CREDENTIAL_HEADERS
+                    .iter()
+                    .any(|h| name.eq_ignore_ascii_case(h))
+            });
+        }
+        let becomes_get =
+            resp.status == 303 || (matches!(resp.status, 301 | 302) && req.method == Method::Post);
+        if becomes_get {
+            req.method = Method::Get;
+            req.body = None;
+            req.headers
+                .retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+        }
+        req.url = next.to_string();
+    }
 }
 
 /// Turn a provider's JSON hit list into results, numbering references as we go.

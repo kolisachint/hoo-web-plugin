@@ -314,7 +314,7 @@ webtools search --query "rust async runtime" --provider brave
 ```
 
 Keys are read from the environment or from
-[`~/.hoocode/settings.json`](#configuration), never from the command line —
+[`~/.config/webtools/config.json`](#configuration), never from the command line —
 a key in `argv` is visible to every process on the machine. They travel in
 request headers, never in a URL, so they cannot leak through error messages,
 proxy logs, or server access logs.
@@ -325,32 +325,30 @@ scraped one.
 
 ### Configuration
 
-`webtools` reads optional settings from `~/.hoocode/settings.json`
-(`$HOOCODE_CONFIG` overrides the path). There is no requirement to have one —
+`webtools` reads optional settings from `~/.config/webtools/config.json`
+(`$XDG_CONFIG_HOME/webtools/config.json` when `XDG_CONFIG_HOME` is set;
+`$WEBTOOLS_CONFIG` overrides the path). There is no requirement to have one —
 a missing file is not an error.
 
-The file is shared with other tooling, so `webtools` reads only its own
-`webtools` key and ignores everything else. Unknown keys inside that section are
-ignored too, so a newer config never breaks an older binary.
+The file holds `webtools` settings at its top level. Unknown keys are ignored,
+so a newer config never breaks an older binary.
 
 ```json
 {
-  "webtools": {
-    "search": {
-      "provider": "brave",
-      "fallback": "duckduckgo",
-      "providers": {
-        "brave":   { "api_key": "..." },
-        "tavily":  { "api_key": "..." },
-        "searxng": { "base_url": "https://searx.internal" }
-      }
-    },
-    "fetch": {
-      "timeout_secs": 20,
-      "max_tokens": 4000,
-      "cache_ttl_secs": 900,
-      "ca_certs": ["/etc/ssl/corp-root.pem"]
+  "search": {
+    "provider": "brave",
+    "fallback": "duckduckgo",
+    "providers": {
+      "brave":   { "api_key": "..." },
+      "tavily":  { "api_key": "..." },
+      "searxng": { "base_url": "https://searx.internal" }
     }
+  },
+  "fetch": {
+    "timeout_secs": 20,
+    "max_tokens": 4000,
+    "cache_ttl_secs": 900,
+    "ca_certs": ["/etc/ssl/corp-root.pem"]
   }
 }
 ```
@@ -372,7 +370,7 @@ often have no home directory to read.
 | SearXNG endpoint | `WEBTOOLS_SEARXNG_URL`, `WEBTOOLS_SEARXNG_API_KEY` |
 
 The file holds credentials, so `webtools` warns when it is readable by other
-users — `chmod 600 ~/.hoocode/settings.json`. Keys are never printed: the
+users — `chmod 600 ~/.config/webtools/config.json`. Keys are never printed: the
 `Debug` implementations of every type that holds one redact it.
 
 The libraries do not read this file. `webtools-fetch` and `webtools-search` are
@@ -411,6 +409,17 @@ Three things are worth knowing about the MCP surface specifically:
 The server takes no command-line flags, so extra CA certificates and a keyed
 search provider both come from [the config file](#configuration) or the
 environment.
+
+## As a hoocode plugin
+
+`plugin/` is an Agent Plugins 1.0 package for [hoocode](https://github.com/kolisachint/hoocode).
+The same libraries run inside hoocode as a WASI 0.2 component
+(`plugin/dev.hoocode/extension.wasm`), with no `webtools` binary on the path. The
+tools are `ext_webtools_fetch` and `ext_webtools_search`, with the MCP argument
+names and defaults. Requests go through hoocode's permission gate and its SSRF
+block, and search keys come from hoocode's settings under `pluginConfig.webtools` (`searchProvider`,
+`braveApiKey`, `tavilyApiKey`, `searxngUrl`). The component's build, tools and
+settings are in [`plugin/README.md`](../plugin/README.md).
 
 ## Security (SSRF guard)
 
@@ -553,7 +562,7 @@ tool, and a thin root binary that wires them into subcommands.
 Cargo.toml              Workspace + the webtools binary package
 src/
 ├── main.rs             Unified CLI: fetch / search / mcp subcommands
-├── config.rs           ~/.hoocode/settings.json loader (binary only)
+├── config.rs           ~/.config/webtools/config.json loader (binary only)
 └── mcp.rs              MCP stdio server (JSON-RPC over stdin/stdout)
 crates/
 ├── core/               webfetch-core: primitives shared by both tools
@@ -562,6 +571,8 @@ crates/
 │       ├── compress.rs   Whitespace/decorative reduction + token estimation
 │       ├── refs.rs       Referable trait, reference block, budget fitting
 │       ├── http.rs       Shared user agent, body cap, retry classification
+│       ├── transport.rs  Transport trait (send + sleep), ReqwestTransport (native)
+│       ├── wasi_transport.rs  WasiTransport over wasi:http (wasi feature)
 │       └── tls.rs        Trust anchors: OS store, SSL_CERT_FILE, --ca-cert
 ├── webfetch/           webfetch: fetch + convert library
 │   └── src/
@@ -581,9 +592,32 @@ crates/
         └── types.rs      Search output structs (SearchOutput, SearchStatus, …)
 ```
 
-Each leaf crate re-exports `webfetch_core::{compress, refs, http, tls}`, so the
-shared reference-style logic has a single home but stays reachable as
-`webfetch::refs` / `websearch::refs`.
+Each leaf crate re-exports `webfetch_core::{compress, refs, http}`, plus `tls`
+only with the `native` feature, so the shared reference-style logic has a single
+home but stays reachable as `webfetch::refs` / `websearch::refs`.
+
+### Transports and features
+
+Every request goes through a `Transport` (in `webfetch_core::transport`):
+`send` performs one hop without following redirects, and `sleep` is the wait
+between retries. The leaf crates build on it with two features, which both
+crates and the core share:
+
+- `native` (default): `ReqwestTransport` over reqwest and rustls, the OS trust
+  store, the SSRF guard with DNS pinning, and tokio for the retry timer.
+  `fetch_page`, `fetch_and_convert`, `run_search` and `Provider::search` use it.
+- `wasi`: `WasiTransport`, which sends through `wasi:http/outgoing-handler` from
+  a `wasm32-wasip2` component. It pulls in no tokio, reqwest or rustls.
+
+The two may both be on, and the native entry points keep working.
+The generic entry points take any transport: `webfetch::fetch_with(&transport,
+url, timeout_secs)` and `websearch::run_search_with` / `Provider::search_with` /
+`websearch::providers::{ddg,brave,tavily,searxng}::search_with`.
+
+A `wasi` build has no SSRF guard, no DNS pinning and no TLS configuration. The
+host the component runs in must enforce those: deny private and loopback
+targets, pin or validate resolution, and terminate TLS. A host refusal reaches
+the library as `TransportError::Other("denied by host: ...")`.
 
 Configuration deliberately lives only in `src/`. The library crates take
 fully-populated option structs and never read the environment or the filesystem

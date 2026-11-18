@@ -1,8 +1,8 @@
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index 1b42220..14b80a9 100644
+index 1b42220..783b12e 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
-@@ -20,6 +20,40 @@ jobs:
+@@ -20,6 +20,86 @@ jobs:
        - name: Format
          run: cargo fmt --all --check
        - name: Clippy
@@ -45,6 +45,52 @@ index 1b42220..14b80a9 100644
 +          toolchain: ${{ steps.msrv.outputs.version }}
 +      - uses: Swatinem/rust-cache@v2
 +      - run: cargo check --workspace --locked
++
++  # The libraries build for wasm32-wasip2 with the `wasi` feature (WASI 0.2
++  # `wasi:http`, no native HTTP stack). Build and lint only: a component host
++  # runs them, so there is no test run here.
++  wasm:
++    name: wasm32-wasip2 (wasi feature)
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: dtolnay/rust-toolchain@stable
++      - name: Add the wasm target
++        run: rustup target add wasm32-wasip2
++      - uses: Swatinem/rust-cache@v2
++      - name: Build
++        run: cargo build -p webtools-core -p webtools-fetch -p webtools-search --target wasm32-wasip2 --no-default-features --features wasi --locked
++      - name: Clippy
++        run: cargo clippy -p webtools-core -p webtools-fetch -p webtools-search --target wasm32-wasip2 --no-default-features --features wasi --locked -- -D warnings
++
++  # The webtools plugin's WASI component (plugin/). Built with plugin/build.sh,
++  # uploaded, and compared byte for byte with the committed
++  # plugin/dev.hoocode/extension.wasm. The toolchain is pinned: the bytes depend
++  # on the rustc version, so a move of `stable` would fail this job. When the
++  # pin changes or the component changes, rebuild and commit the artifact.
++  plugin:
++    name: plugin component
++    runs-on: ubuntu-latest
++    env:
++      # build.sh builds here, so the cache below must cover this directory.
++      WEBTOOLS_TARGET_DIR: ${{ runner.temp }}/webtools-plugin-target
++    steps:
++      - uses: actions/checkout@v4
++      - uses: dtolnay/rust-toolchain@1.97.0
++      - name: Add the wasm target
++        run: rustup target add wasm32-wasip2
++      - uses: Swatinem/rust-cache@v2
++        with:
++          workspaces: plugin/component -> ${{ runner.temp }}/webtools-plugin-target
++      - name: Build the component
++        run: plugin/build.sh
++      - name: Upload the component
++        uses: actions/upload-artifact@v4
++        with:
++          name: webtools-extension-wasm
++          path: plugin/dev.hoocode/extension.wasm
++      - name: Compare with the committed component
++        run: git diff --exit-code plugin/dev.hoocode/extension.wasm
 diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
 index 7529b57..fd8cc12 100644
 --- a/.github/workflows/release.yml

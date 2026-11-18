@@ -4,37 +4,63 @@
 //! where queries must not leave the estate. `base_url` points at the instance
 //! root; the optional key travels as a bearer header.
 
-use crate::types::{SearchOptions, SearchResult, SearchStatus};
-use webfetch_core::http::read_body_capped;
+use std::time::Duration;
 
+use url::Url;
+
+use crate::types::{SearchOptions, SearchResult, SearchStatus};
+#[cfg(feature = "native")]
+use webfetch_core::transport::ReqwestTransport;
+use webfetch_core::transport::{HttpRequest, Method, Transport};
+
+/// Search over the native transport.
+#[cfg(feature = "native")]
 pub async fn search(
     options: &SearchOptions,
     max: usize,
     base_url: &str,
     api_key: Option<&str>,
 ) -> anyhow::Result<(Vec<SearchResult>, SearchStatus)> {
-    let client = super::client(options.timeout_secs, &options.tls)?;
+    let transport = ReqwestTransport::new(&options.tls)?;
+    search_with(&transport, options, max, base_url, api_key).await
+}
 
+/// Search through a caller-supplied transport.
+pub async fn search_with(
+    transport: &impl Transport,
+    options: &SearchOptions,
+    max: usize,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> anyhow::Result<(Vec<SearchResult>, SearchStatus)> {
     let endpoint = format!("{}/search", base_url.trim_end_matches('/'));
-    let mut request = client
-        .get(&endpoint)
-        .query(&[("q", options.query.as_str()), ("format", "json")])
-        .header("Accept", "application/json");
+    let mut query = vec![("q", options.query.clone()), ("format", "json".to_string())];
     if let Some(safe) = options.safe_search {
-        request = request.query(&[("safesearch", if safe { "2" } else { "0" })]);
+        query.push(("safesearch", if safe { "2" } else { "0" }.to_string()));
     }
+    let url = Url::parse_with_params(&endpoint, query)?;
+
+    let mut headers = vec![("Accept".to_string(), "application/json".to_string())];
     if let Some(key) = api_key {
-        request = request.header("Authorization", format!("Bearer {key}"));
+        headers.push(("Authorization".to_string(), format!("Bearer {key}")));
+    }
+    let request = HttpRequest {
+        method: Method::Get,
+        url: url.to_string(),
+        headers,
+        body: None,
+        timeout: Some(Duration::from_secs(options.timeout_secs)),
+    };
+    let resp = super::send_following(transport, request, super::MAX_REDIRECTS).await?;
+    let body = String::from_utf8_lossy(&resp.body);
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!(
+            "searxng search failed ({}): {}",
+            webfetch_core::http::status_text(resp.status),
+            body.trim()
+        );
     }
 
-    let resp = request.send().await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("searxng search failed ({status}): {}", body.trim());
-    }
-
-    let body = read_body_capped(resp).await.map_err(|(e, _)| e)?;
     Ok(parse(&body, max))
 }
 

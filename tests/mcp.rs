@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 fn exchange(requests: &str, env: &[(&str, &str)]) -> Vec<serde_json::Value> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_webtools"));
     cmd.arg("mcp")
-        .env_remove("HOOCODE_CONFIG")
+        .env_remove("WEBTOOLS_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());

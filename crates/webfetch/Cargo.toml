@@ -14,11 +14,19 @@ categories = ["web-programming", "text-processing"]
 [lib]
 name = "webfetch"
 
+[features]
+default = ["native"]
+# Native HTTP (`ReqwestTransport`), the SSRF guard and the OS trust store.
+# Without it, callers use `fetch_with` and supply their own `Transport`.
+native = ["webfetch-core/native", "dep:tokio"]
+# WASI 0.2 `wasi:http` transport from webfetch-core. The host enforces SSRF
+# policy, timeouts and TLS; `fetch_with` is the entry point.
+wasi = ["webfetch-core/wasi"]
+
 [dependencies]
 webfetch-core = { workspace = true }
 regex = { workspace = true }
-tokio = { workspace = true }
-reqwest = { workspace = true }
+tokio = { workspace = true, optional = true }
 scraper = { workspace = true }
 ego-tree = { workspace = true }
 serde = { workspace = true }

@@ -26,6 +26,23 @@ Runs on pushes to `main` and on PRs:
   time.
 - **msrv** — builds the workspace on the `rust-version` declared in
   `Cargo.toml`. The libraries are published, so downstream users hold us to it.
+  `Cargo.lock` carries pins that keep dependencies within that version (for
+  example `zeroize 1.8.1`, `clap 4.5.40`, `async-compression 0.4.27`). A
+  `cargo update` can pull in newer releases that need a newer rustc; if this job
+  fails after an update, pin the offending crate with `cargo update -p <crate>
+  --precise <ver>` instead of raising `rust-version`.
+- **wasm** — `rustup target add wasm32-wasip2`, then builds and clippy-lints
+  `webtools-core`, `webtools-fetch` and `webtools-search` with
+  `--no-default-features --features wasi`. Build and lint only, no tests. This
+  keeps the WASI transport from pulling tokio, reqwest or rustls back in.
+- **plugin** — runs `plugin/build.sh` to build the hoocode plugin's WASI
+  component, uploads it as an artifact, then runs
+  `git diff --exit-code plugin/dev.hoocode/extension.wasm`. The build is
+  byte-reproducible across checkout paths and target directories, so a
+  difference means the committed component is stale: rebuild with
+  `plugin/build.sh` and commit it. The toolchain is pinned to `1.97.0` because
+  the output depends on the rustc version; bump the pin together with a rebuilt
+  artifact.
 
 `--locked` everywhere: a run that quietly resolves different dependencies than
 `Cargo.lock` pins is not testing what ships.

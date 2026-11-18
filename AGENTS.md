@@ -15,7 +15,7 @@ Docs (keep these current when behavior changes):
 Code:
 
 - `src/main.rs` — unified CLI (`fetch`, `search`, `mcp` subcommands)
-- `src/config.rs` — `~/.hoocode/settings.json` loader. Config lives in the
+- `src/config.rs` — `~/.config/webtools/config.json` loader (`WEBTOOLS_CONFIG` overrides). Config lives in the
   binary only; the published libraries never read the environment or the
   filesystem on a caller's behalf
 - `src/mcp.rs` — MCP stdio server (JSON-RPC over stdin/stdout)

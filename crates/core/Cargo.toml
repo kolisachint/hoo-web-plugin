@@ -14,11 +14,23 @@ categories = ["web-programming", "text-processing"]
 [lib]
 name = "webfetch_core"
 
+[features]
+default = ["native"]
+# Native HTTP over reqwest: `ReqwestTransport`, the OS trust store (`tls`), and
+# the tokio timer behind `Transport::sleep`.
+native = ["dep:reqwest", "dep:rustls-native-certs", "dep:anyhow", "dep:tokio"]
+# WASI 0.2 `wasi:http`: `WasiTransport`. The host the component runs in owns
+# SSRF policy, timeouts and TLS, so this path enforces none of them.
+wasi = ["dep:wasip2", "dep:url"]
+
 [dependencies]
 serde = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
 encoding_rs = { workspace = true }
-reqwest = { workspace = true }
-rustls-native-certs = { workspace = true }
-anyhow = { workspace = true }
+anyhow = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+wasip2 = { version = "1.0.1", optional = true }

@@ -14,14 +14,22 @@ categories = ["web-programming", "text-processing"]
 [lib]
 name = "websearch"
 
+[features]
+default = ["native"]
+# Native HTTP (`ReqwestTransport`) and the OS trust store. Without it, callers
+# use the `*_with` entry points and supply their own `Transport`.
+native = ["webfetch-core/native", "dep:tokio"]
+# WASI 0.2 `wasi:http` transport from webfetch-core. The host enforces SSRF
+# policy, timeouts and TLS; the `*_with` entry points are the API.
+wasi = ["webfetch-core/wasi"]
+
 [dependencies]
 webfetch-core = { workspace = true }
-tokio = { workspace = true }
-reqwest = { workspace = true }
-scraper = { workspace = true }
+tokio = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
 anyhow = { workspace = true }
 urlencoding = { workspace = true }
 once_cell = { workspace = true }
+scraper = { workspace = true }

@@ -24,7 +24,7 @@ one silent empty answer.
 
 DuckDuckGo needs no key and is the default. When search reliability matters,
 point `webtools` at Brave, Tavily, or your own SearXNG — keys come from the
-environment or `~/.hoocode/settings.json`, never from the command line:
+environment or `~/.config/webtools/config.json`, never from the command line:
 
 ```bash
 webtools search --query "rust async runtime" --provider brave
@@ -44,6 +44,8 @@ with `--ca-cert <PATH>`, or, as a last resort, skip verification with
 
 - [Product](docs/product.md) — what it does, features, usage, MCP, architecture
 - [Install & Development](docs/install.md) — install, library use, releasing
+- [hoocode plugin](plugin/README.md) — the same `fetch` and `search` as an
+  Agent Plugins 1.0 package for hoocode, built as a WASI component
 
 ## Related
 

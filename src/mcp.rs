@@ -254,7 +254,7 @@ async fn handle_tool_call(msg: &Value, config: &Config) -> Result<Value> {
             let url = arg_str(&args, "url")
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: url"))?
                 .to_string();
-            let fetch_config = &config.webtools.fetch;
+            let fetch_config = &config.fetch;
             let options = FetchOptions {
                 url,
                 content_type: ContentType::parse(arg_str(&args, "output").unwrap_or("text")),
@@ -331,7 +331,7 @@ async fn handle_tool_call(msg: &Value, config: &Config) -> Result<Value> {
                 Some("off") => Some(false),
                 _ => None,
             };
-            let search_config = &config.webtools.search;
+            let search_config = &config.search;
             let primary = search_config.resolve_primary(None)?;
             let fallback = search_config.resolve_fallback(&primary);
 
@@ -343,7 +343,7 @@ async fn handle_tool_call(msg: &Value, config: &Config) -> Result<Value> {
                 safe_search,
                 timeout_secs: args.get("timeout").and_then(Value::as_u64).unwrap_or(10),
                 tls: webfetch::tls::TlsConfig {
-                    ca_certs: config.webtools.fetch.ca_certs.clone(),
+                    ca_certs: config.fetch.ca_certs.clone(),
                     insecure: false,
                 },
                 provider: primary,
