@@ -66,25 +66,29 @@ fn classify_declared(content_type: Option<&str>, body: &str) -> Media {
 }
 
 /// Does a decoded body look like binary data rather than text? Among the first
-/// 8 KiB characters, more than one in ten being a C0 control character (other
-/// than the whitespace and escape text uses) counts as binary.
+/// 8 KiB characters, any NUL makes it binary, and so does more than 2% C0
+/// control characters (other than the whitespace and escape text uses). Text
+/// has essentially none of either. Compressed bytes are a small share of
+/// control characters in a small body, so a 10% threshold let them through.
 ///
 /// U+FFFD does not count. A legacy-charset page with no charset label is
 /// decoded lossily as UTF-8 and comes out full of replacement characters, and
-/// it is still text. Compressed or raw bytes always carry NUL and other C0
-/// bytes, so the control-character count is enough to catch them.
+/// it is still text.
 pub fn looks_binary(body: &str) -> bool {
     const SAMPLE: usize = 8 * 1024;
     let mut sampled = 0usize;
     let mut odd = 0usize;
     for c in body.chars().take(SAMPLE) {
         sampled += 1;
+        if c == '\0' {
+            return true;
+        }
         let control = c < ' ' && !matches!(c, '\t' | '\n' | '\r' | '\u{0C}' | '\u{1B}');
         if control {
             odd += 1;
         }
     }
-    odd * 10 > sampled
+    odd * 50 > sampled
 }
 
 fn sniff(body: &str) -> Media {
@@ -161,6 +165,38 @@ mod tests {
         assert!(!looks_binary(&body));
         assert_eq!(classify(Some("text/html"), &body), Media::Html);
         assert_eq!(classify(None, &body), Media::Html);
+    }
+
+    /// A small gzip body (of "word " x 2000) passed through lossy UTF-8 and
+    /// declared as HTML is binary: it must not be printed as a page.
+    #[test]
+    fn small_gzip_body_declared_html_is_binary() {
+        let packed: &[u8] = &[
+            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xed, 0xc4, 0x31, 0x0d,
+            0x00, 0x00, 0x08, 0x03, 0x30, 0x2b, 0x88, 0xe3, 0x27, 0xe1, 0x99, 0x7d, 0x74, 0x90,
+            0xb4, 0x47, 0x33, 0xdb, 0x15, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24,
+            0x49, 0x92, 0x24, 0x49, 0x92, 0x7e, 0x77, 0x1c, 0x91, 0xec, 0x3f, 0x10, 0x27, 0x00,
+            0x00,
+        ];
+        let body = String::from_utf8_lossy(packed).into_owned();
+        assert!(looks_binary(&body));
+        assert_eq!(
+            classify(Some("text/html"), &body),
+            Media::Other("text/html".into())
+        );
+    }
+
+    /// The control-character share is a 2% threshold, with no NUL needed.
+    #[test]
+    fn stray_controls_past_two_percent_are_binary() {
+        let body: String = (0..2000)
+            .map(|i| if i % 33 == 0 { '\u{1}' } else { 'w' })
+            .collect();
+        assert!(looks_binary(&body));
+        let body: String = (0..2000)
+            .map(|i| if i % 100 == 0 { '\u{1}' } else { 'w' })
+            .collect();
+        assert!(!looks_binary(&body));
     }
 
     /// A gzip body declared as JSON is binary, not a document to print.

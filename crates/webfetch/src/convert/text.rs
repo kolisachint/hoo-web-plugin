@@ -132,21 +132,27 @@ fn walk(node: NodeRef<Node>, out: &mut String, refs: &mut RefCollector) {
                     }
                     return;
                 }
+                // Only an anchor that earns a marker suppresses the links inside
+                // it. An `<a name>` with no usable href is not a link.
+                let resolved = el.attr("href").and_then(|href| refs.resolve(href));
+                let linked = resolved.is_some();
                 // Collect the anchor's inner text first.
-                refs.anchor_depth += 1;
+                if linked {
+                    refs.anchor_depth += 1;
+                }
                 let mut inner = String::new();
                 for child in node.children() {
                     walk(child, &mut inner, refs);
                 }
-                refs.anchor_depth -= 1;
+                if linked {
+                    refs.anchor_depth -= 1;
+                }
                 let inner = plain(&inner).trim().to_string();
                 out.push_str(&inner);
-                if let Some(href) = el.attr("href") {
-                    if let Some(resolved) = refs.resolve(href) {
-                        let idx = refs.index_for(resolved, &inner);
-                        out.push(' ');
-                        push_citation(out, idx, &format!("[{idx}]"));
-                    }
+                if let Some(resolved) = resolved {
+                    let idx = refs.index_for(resolved, &inner);
+                    out.push(' ');
+                    push_citation(out, idx, &format!("[{idx}]"));
                 }
                 return;
             }
@@ -230,6 +236,17 @@ mod tests {
         let (text, _) = html_to_text_with_refs(html, "https://x.test/");
         assert!(text.contains("Name | Type"), "text: {text:?}");
         assert!(text.contains("alpha | string"), "text: {text:?}");
+    }
+
+    /// An `<a name>` has no destination, so it does not suppress the link
+    /// inside it: the table's link keeps its marker and reference.
+    #[test]
+    fn a_link_inside_an_anchor_without_href_keeps_its_marker() {
+        let html = r#"<article><a name="x"><table><tr><td><a href="https://x.test/b">inner</a></td></tr></table></a></article>"#;
+        let (text, refs) = html_to_text_with_refs(html, "https://x.test/");
+        assert_eq!(refs.len(), 1, "refs: {refs:?}");
+        assert_eq!(refs[0].url, "https://x.test/b");
+        assert!(text.contains("inner [1]"), "text: {text:?}");
     }
 
     #[test]
