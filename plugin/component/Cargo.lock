@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "webtools-core"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "brotli-decompressor",
  "encoding_rs",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "webtools-extension"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "webtools-fetch"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "ego-tree",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "webtools-search"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "once_cell",

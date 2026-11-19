@@ -11,6 +11,8 @@ lockstep semantic versioning across all crates.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-19
+
 ### Fixed
 
 - **Refused requests name the code.** The `wasi:http` transport words a host
