@@ -87,6 +87,14 @@ Code:
 root `Cargo.toml`, all `crates/*/Cargo.toml`, and the internal
 `path + version` dependency requirements together.
 
+The plugin is in lockstep too. The release also sets `version` in
+`plugin/component/Cargo.toml` and `"version"` in `plugin/plugin.json`, and
+refreshes `plugin/component/Cargo.lock` for the three webtools crates. It does
+not rebuild `plugin/dev.hoocode/extension.wasm`. The component embeds the crate
+versions, so the committed wasm lags after each release until
+`plugin/build.sh` is run and the artifact committed. The CI `plugin` job fails
+while it lags.
+
 **Version semantics**:
 
 - `patch` — bug fixes and additions

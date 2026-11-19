@@ -74,7 +74,14 @@ jobs:
           done
           sed -i "s/\(path = \"[^\"]*\", version = \"\)[^\"]*\"/\1$NEW_VERSION\"/" Cargo.toml
 
+          # The plugin is outside the workspace (own manifest, own lock), so the
+          # loop above misses it. It is released in lockstep with the crates.
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" plugin/component/Cargo.toml
+          [ "$(grep -c '"version":' plugin/plugin.json)" = 1 ] || { echo "plugin.json: expected one version key" >&2; exit 1; }
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$NEW_VERSION\"/" plugin/plugin.json
+
           cargo update --workspace
+          cargo update --manifest-path plugin/component/Cargo.toml -p webtools-core -p webtools-fetch -p webtools-search
 
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
@@ -102,7 +109,7 @@ jobs:
       - name: Commit and tag
         run: |
           VERSION="${{ steps.bump.outputs.version }}"
-          git add Cargo.toml Cargo.lock crates/*/Cargo.toml CHANGELOG.md
+          git add Cargo.toml Cargo.lock crates/*/Cargo.toml plugin/component/Cargo.toml plugin/component/Cargo.lock plugin/plugin.json CHANGELOG.md
           git commit -m "release: v${VERSION}"
           git tag -a "v${VERSION}" -m "release: v${VERSION}"
 

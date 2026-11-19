@@ -35,14 +35,19 @@ Runs on pushes to `main` and on PRs:
   `webtools-core`, `webtools-fetch` and `webtools-search` with
   `--no-default-features --features wasi`. Build and lint only, no tests. This
   keeps the WASI transport from pulling tokio, reqwest or rustls back in.
-- **plugin** — runs `plugin/build.sh` to build the hoocode plugin's WASI
+- **plugin** — first runs `cargo metadata --locked --manifest-path
+  plugin/component/Cargo.toml` as a cheap check that the component's lock
+  matches its manifests (a stale lock fails here, before the wasm build). Then
+  runs `plugin/build.sh` (`--locked`) to build the hoocode plugin's WASI
   component, uploads it as an artifact, then runs
   `git diff --exit-code plugin/dev.hoocode/extension.wasm`. The build is
   byte-reproducible across checkout paths and target directories, so a
   difference means the committed component is stale: rebuild with
   `plugin/build.sh` and commit it. The toolchain is pinned to `1.97.0` because
   the output depends on the rustc version; bump the pin together with a rebuilt
-  artifact.
+  artifact. The release bump changes the component's version, so the committed
+  wasm lags after each release until it is rebuilt; the `plugin` job fails until
+  then.
 
 `--locked` everywhere: a run that quietly resolves different dependencies than
 `Cargo.lock` pins is not testing what ships.
@@ -57,7 +62,9 @@ Runs five jobs:
 
 1. **bump-and-tag** — derives the next version from the latest `v*` tag (not
    from the manifest, so a stray manual edit cannot shift the sequence), bumps
-   it based on the label, stamps `CHANGELOG.md`'s `[Unreleased]` section with
+   it based on the label, sets it in the crates and in the plugin
+   (`plugin/component/Cargo.toml`, `plugin/plugin.json`), refreshes both lock
+   files, stamps `CHANGELOG.md`'s `[Unreleased]` section with
    the new version and date, commits to `main`, pushes, and creates an
    annotated `v*` tag
 2. **publish** — publishes crates to crates.io in dependency order
