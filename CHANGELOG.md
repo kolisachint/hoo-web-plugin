@@ -32,10 +32,10 @@ lockstep semantic versioning across all crates.
 - **Release bumps the plugin files.** `release.yml` also sets the version in
   `plugin/component/Cargo.toml` and `plugin/plugin.json`, and refreshes
   `plugin/component/Cargo.lock` for the webtools crates, so the plugin stays in
-  lockstep with the crates.
-- **Rebuilt `plugin/dev.hoocode/extension.wasm`** against 0.7.2. The release
-  workflow does not rebuild the wasm, so it lags after each release until
-  `plugin/build.sh` is run.
+  lockstep with the crates. It also rebuilds `plugin/dev.hoocode/extension.wasm`
+  with `plugin/build.sh` on the CI toolchain and commits it, so the artifact
+  matches each release.
+- **Rebuilt `plugin/dev.hoocode/extension.wasm`** against 0.7.2.
 
 ## [0.7.2] - 2026-11-18
 

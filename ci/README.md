@@ -45,9 +45,7 @@ Runs on pushes to `main` and on PRs:
   difference means the committed component is stale: rebuild with
   `plugin/build.sh` and commit it. The toolchain is pinned to `1.97.0` because
   the output depends on the rustc version; bump the pin together with a rebuilt
-  artifact. The release bump changes the component's version, so the committed
-  wasm lags after each release until it is rebuilt; the `plugin` job fails until
-  then.
+  artifact.
 
 `--locked` everywhere: a run that quietly resolves different dependencies than
 `Cargo.lock` pins is not testing what ships.
@@ -64,7 +62,8 @@ Runs five jobs:
    from the manifest, so a stray manual edit cannot shift the sequence), bumps
    it based on the label, sets it in the crates and in the plugin
    (`plugin/component/Cargo.toml`, `plugin/plugin.json`), refreshes both lock
-   files, stamps `CHANGELOG.md`'s `[Unreleased]` section with
+   files, rebuilds `plugin/dev.hoocode/extension.wasm` with `plugin/build.sh` on
+   the pinned toolchain, stamps `CHANGELOG.md`'s `[Unreleased]` section with
    the new version and date, commits to `main`, pushes, and creates an
    annotated `v*` tag
 2. **publish** — publishes crates to crates.io in dependency order

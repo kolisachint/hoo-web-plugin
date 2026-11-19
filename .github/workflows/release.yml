@@ -86,6 +86,20 @@ jobs:
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
+      # The component embeds the crate versions, so it is rebuilt after the bump
+      # and committed with it. Same pinned toolchain and cache as ci.yml's
+      # plugin job, which compares the committed bytes.
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Add the wasm target
+        run: rustup target add wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugin/component -> ${{ runner.temp }}/webtools-plugin-target
+      - name: Build the plugin component
+        env:
+          WEBTOOLS_TARGET_DIR: ${{ runner.temp }}/webtools-plugin-target
+        run: plugin/build.sh
+
       - name: Stamp the changelog
         run: |
           # CHANGELOG.md documents that entries land under Unreleased and are
@@ -109,7 +123,7 @@ jobs:
       - name: Commit and tag
         run: |
           VERSION="${{ steps.bump.outputs.version }}"
-          git add Cargo.toml Cargo.lock crates/*/Cargo.toml plugin/component/Cargo.toml plugin/component/Cargo.lock plugin/plugin.json CHANGELOG.md
+          git add Cargo.toml Cargo.lock crates/*/Cargo.toml plugin/component/Cargo.toml plugin/component/Cargo.lock plugin/plugin.json plugin/dev.hoocode/extension.wasm CHANGELOG.md
           git commit -m "release: v${VERSION}"
           git tag -a "v${VERSION}" -m "release: v${VERSION}"
 
