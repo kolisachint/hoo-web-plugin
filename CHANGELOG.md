@@ -11,6 +11,32 @@ lockstep semantic versioning across all crates.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plugin component lock refreshed.** `plugin/component/Cargo.lock` pinned
+  `webtools-core`, `webtools-fetch` and `webtools-search` at 0.7.1 while the
+  crates were 0.7.2, so `plugin/build.sh` (`--locked`) failed. The lock now
+  matches the manifests.
+- **Version drift.** `plugin/component/Cargo.toml` was at 0.6.0 and
+  `plugin/plugin.json` at 0.7.0, while the released crates were 0.7.2. Both are
+  now 0.7.2. The release workflow never set the plugin's files, which caused
+  the drift.
+- **`docs/product.md`** names the config key as `fetch.cache_ttl_secs`, as
+  `src/config.rs` reads it, instead of `webtools.fetch.cache_ttl_secs`.
+
+### Changed
+
+- **CI guards the component lock.** The `plugin` job runs `cargo metadata
+  --locked` on `plugin/component` before the wasm build, so a stale lock fails
+  at once.
+- **Release bumps the plugin files.** `release.yml` also sets the version in
+  `plugin/component/Cargo.toml` and `plugin/plugin.json`, and refreshes
+  `plugin/component/Cargo.lock` for the webtools crates, so the plugin stays in
+  lockstep with the crates.
+- **Rebuilt `plugin/dev.hoocode/extension.wasm`** against 0.7.2. The release
+  workflow does not rebuild the wasm, so it lags after each release until
+  `plugin/build.sh` is run.
+
 ## [0.7.2] - 2026-11-18
 
 ### Added

@@ -211,7 +211,7 @@ many windows it takes — and every window sees the same snapshot, which is what
 keeps offsets from an earlier response addressing text that still exists. Pages
 are cached by requested URL under `$XDG_CACHE_HOME/webtools/fetch` (or
 `~/.cache/webtools/fetch`, `~/Library/Caches/...` on macOS), owner-only, for 15
-minutes. `WEBTOOLS_CACHE_DIR` moves it, `webtools.fetch.cache_ttl_secs` or
+minutes. `WEBTOOLS_CACHE_DIR` moves it, `fetch.cache_ttl_secs` in the config file or
 `WEBTOOLS_CACHE_TTL` changes the window, and `--no-cache` or
 `WEBTOOLS_NO_CACHE=1` turns it off — at the cost of a download per window. The
 cache is best-effort throughout: one that cannot be read, written, or pruned
