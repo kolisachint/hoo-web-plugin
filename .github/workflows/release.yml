@@ -74,10 +74,31 @@ jobs:
           done
           sed -i "s/\(path = \"[^\"]*\", version = \"\)[^\"]*\"/\1$NEW_VERSION\"/" Cargo.toml
 
+          # The plugin is outside the workspace (own manifest, own lock), so the
+          # loop above misses it. It is released in lockstep with the crates.
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" plugin/component/Cargo.toml
+          [ "$(grep -c '"version":' plugin/plugin.json)" = 1 ] || { echo "plugin.json: expected one version key" >&2; exit 1; }
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$NEW_VERSION\"/" plugin/plugin.json
+
           cargo update --workspace
+          cargo update --manifest-path plugin/component/Cargo.toml -p webtools-core -p webtools-fetch -p webtools-search
 
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      # The component embeds the crate versions, so it is rebuilt after the bump
+      # and committed with it. Same pinned toolchain and cache as ci.yml's
+      # plugin job, which compares the committed bytes.
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Add the wasm target
+        run: rustup target add wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugin/component -> ${{ runner.temp }}/webtools-plugin-target
+      - name: Build the plugin component
+        env:
+          WEBTOOLS_TARGET_DIR: ${{ runner.temp }}/webtools-plugin-target
+        run: plugin/build.sh
 
       - name: Stamp the changelog
         run: |
@@ -102,7 +123,7 @@ jobs:
       - name: Commit and tag
         run: |
           VERSION="${{ steps.bump.outputs.version }}"
-          git add Cargo.toml Cargo.lock crates/*/Cargo.toml CHANGELOG.md
+          git add Cargo.toml Cargo.lock crates/*/Cargo.toml plugin/component/Cargo.toml plugin/component/Cargo.lock plugin/plugin.json plugin/dev.hoocode/extension.wasm CHANGELOG.md
           git commit -m "release: v${VERSION}"
           git tag -a "v${VERSION}" -m "release: v${VERSION}"
 

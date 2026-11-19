@@ -87,6 +87,13 @@ Code:
 root `Cargo.toml`, all `crates/*/Cargo.toml`, and the internal
 `path + version` dependency requirements together.
 
+The plugin is in lockstep too. The release also sets `version` in
+`plugin/component/Cargo.toml` and `"version"` in `plugin/plugin.json`, and
+refreshes `plugin/component/Cargo.lock` for the three webtools crates, rebuilds
+`plugin/dev.hoocode/extension.wasm` with `plugin/build.sh` on the CI toolchain
+(rustc 1.97.0), and commits all of them. The component embeds the crate
+versions, so the artifact must be rebuilt after the bump.
+
 **Version semantics**:
 
 - `patch` — bug fixes and additions

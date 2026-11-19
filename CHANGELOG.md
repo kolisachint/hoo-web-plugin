@@ -11,6 +11,41 @@ lockstep semantic versioning across all crates.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refused requests name the code.** The `wasi:http` transport words a host
+  refusal as `denied by host (<code>): ...` (for example `HttpRequestDenied`),
+  so a host can tell which refusal it was.
+
+- **Plugin component lock refreshed.** `plugin/component/Cargo.lock` pinned
+  `webtools-core`, `webtools-fetch` and `webtools-search` at 0.7.1 while the
+  crates were 0.7.2, so `plugin/build.sh` (`--locked`) failed. The lock now
+  matches the manifests.
+- **Version drift.** `plugin/component/Cargo.toml` was at 0.6.0 and
+  `plugin/plugin.json` at 0.7.0, while the released crates were 0.7.2. Both are
+  now 0.7.2. The release workflow never set the plugin's files, which caused
+  the drift.
+- **`docs/product.md`** names the config key as `fetch.cache_ttl_secs`, as
+  `src/config.rs` reads it, instead of `webtools.fetch.cache_ttl_secs`.
+
+### Changed
+
+- **Plugin tool names.** The plugin's tools are `WebFetch` and `WebSearch`
+  (were `fetch` and `search`, which hoocode prefixed as `ext_webtools_*`). The host
+  now uses the declared name as is. The MCP server and CLI keep `fetch` and
+  `search`. `plugin/plugin.json` declares the `dev.hoocode` extension tools and
+  their render hints. The WIT doc comment on `tool-info.name` documents the rule.
+- **CI guards the component lock.** The `plugin` job runs `cargo metadata
+  --locked` on `plugin/component` before the wasm build, so a stale lock fails
+  at once.
+- **Release bumps the plugin files.** `release.yml` also sets the version in
+  `plugin/component/Cargo.toml` and `plugin/plugin.json`, and refreshes
+  `plugin/component/Cargo.lock` for the webtools crates, so the plugin stays in
+  lockstep with the crates. It also rebuilds `plugin/dev.hoocode/extension.wasm`
+  with `plugin/build.sh` on the CI toolchain and commits it, so the artifact
+  matches each release.
+- **Rebuilt `plugin/dev.hoocode/extension.wasm`** against 0.7.2.
+
 ## [0.7.2] - 2026-11-18
 
 ### Added

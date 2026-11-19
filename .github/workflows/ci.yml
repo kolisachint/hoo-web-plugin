@@ -94,6 +94,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: plugin/component -> ${{ runner.temp }}/webtools-plugin-target
+      # Fails fast when plugin/component/Cargo.lock is stale against the
+      # manifests (e.g. a webtools crate bumped without a lock refresh).
+      - name: Check the component lock
+        run: cargo metadata --locked --manifest-path plugin/component/Cargo.toml >/dev/null
       - name: Build the component
         run: plugin/build.sh
       - name: Upload the component

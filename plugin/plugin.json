@@ -1,9 +1,17 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "webtools",
-  "version": "0.7.0",
+  "version": "0.7.2",
   "description": "Web fetch and search for hoocode: token-efficient, reference-style page text and search results with citable URLs.",
   "license": "MIT",
   "repository": "https://github.com/kolisachint/hoo-web-plugin",
-  "keywords": ["web", "fetch", "search", "webtools"]
+  "keywords": ["web", "fetch", "search", "webtools"],
+  "extensions": {
+    "dev.hoocode": {
+      "tools": {
+        "WebFetch": { "render": "web-fetch" },
+        "WebSearch": { "render": "web-search" }
+      }
+    }
+  }
 }

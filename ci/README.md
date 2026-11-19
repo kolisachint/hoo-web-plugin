@@ -35,7 +35,10 @@ Runs on pushes to `main` and on PRs:
   `webtools-core`, `webtools-fetch` and `webtools-search` with
   `--no-default-features --features wasi`. Build and lint only, no tests. This
   keeps the WASI transport from pulling tokio, reqwest or rustls back in.
-- **plugin** — runs `plugin/build.sh` to build the hoocode plugin's WASI
+- **plugin** — first runs `cargo metadata --locked --manifest-path
+  plugin/component/Cargo.toml` as a cheap check that the component's lock
+  matches its manifests (a stale lock fails here, before the wasm build). Then
+  runs `plugin/build.sh` (`--locked`) to build the hoocode plugin's WASI
   component, uploads it as an artifact, then runs
   `git diff --exit-code plugin/dev.hoocode/extension.wasm`. The build is
   byte-reproducible across checkout paths and target directories, so a
@@ -57,7 +60,10 @@ Runs five jobs:
 
 1. **bump-and-tag** — derives the next version from the latest `v*` tag (not
    from the manifest, so a stray manual edit cannot shift the sequence), bumps
-   it based on the label, stamps `CHANGELOG.md`'s `[Unreleased]` section with
+   it based on the label, sets it in the crates and in the plugin
+   (`plugin/component/Cargo.toml`, `plugin/plugin.json`), refreshes both lock
+   files, rebuilds `plugin/dev.hoocode/extension.wasm` with `plugin/build.sh` on
+   the pinned toolchain, stamps `CHANGELOG.md`'s `[Unreleased]` section with
    the new version and date, commits to `main`, pushes, and creates an
    annotated `v*` tag
 2. **publish** — publishes crates to crates.io in dependency order

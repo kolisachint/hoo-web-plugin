@@ -211,7 +211,7 @@ many windows it takes — and every window sees the same snapshot, which is what
 keeps offsets from an earlier response addressing text that still exists. Pages
 are cached by requested URL under `$XDG_CACHE_HOME/webtools/fetch` (or
 `~/.cache/webtools/fetch`, `~/Library/Caches/...` on macOS), owner-only, for 15
-minutes. `WEBTOOLS_CACHE_DIR` moves it, `webtools.fetch.cache_ttl_secs` or
+minutes. `WEBTOOLS_CACHE_DIR` moves it, `fetch.cache_ttl_secs` in the config file or
 `WEBTOOLS_CACHE_TTL` changes the window, and `--no-cache` or
 `WEBTOOLS_NO_CACHE=1` turns it off — at the cost of a download per window. The
 cache is best-effort throughout: one that cannot be read, written, or pruned
@@ -424,13 +424,16 @@ environment.
 `plugin/` is an Agent Plugins 1.0 package for [hoocode](https://github.com/kolisachint/hoocode).
 The same libraries run inside hoocode as a WASI 0.2 component
 (`plugin/dev.hoocode/extension.wasm`), with no `webtools` binary on the path. The
-tools are `ext_webtools_fetch` and `ext_webtools_search`, with the MCP argument
-names and defaults. The plugin caps each request (8 s for `fetch`, 12 s for
-`search`) and each call at 25 s, so a slow search provider is given time to answer
-and a fallback still gets a turn. Requests go through hoocode's permission gate and its SSRF
-block, and search keys come from hoocode's settings under `pluginConfig.webtools` (`searchProvider`,
-`braveApiKey`, `tavilyApiKey`, `searxngUrl`). The component's build, tools and
-settings are in [`plugin/README.md`](../plugin/README.md).
+tools are `WebFetch` and `WebSearch`, the names the component declares, with no
+prefix. The MCP argument names and defaults are kept. The plugin caps each request
+(8 s for `WebFetch`, 12 s for `WebSearch`) and each call at 25 s, so a slow search
+provider is given time to answer and a fallback still gets a turn. Requests go
+through hoocode's permission gate and its SSRF block, and search keys come from
+hoocode's settings under `pluginConfig.webtools` (`searchProvider`, `braveApiKey`,
+`tavilyApiKey`, `searxngUrl`). Permission rules can select these tools by name
+(`WebFetch`, `WebSearch`) or by origin (`plugin:webtools`, every tool from this
+plugin). The component's build, tools and settings are in
+[`plugin/README.md`](../plugin/README.md).
 
 ## Security (SSRF guard)
 
@@ -631,7 +634,7 @@ url, timeout_secs)` and `websearch::run_search_with` / `Provider::search_with` /
 A `wasi` build has no SSRF guard, no DNS pinning and no TLS configuration. The
 host the component runs in must enforce those: deny private and loopback
 targets, pin or validate resolution, and terminate TLS. A host refusal reaches
-the library as `TransportError::Other("denied by host: ...")`.
+the library as `TransportError::Other("denied by host (<code>): ...")`.
 
 Configuration deliberately lives only in `src/`. The library crates take
 fully-populated option structs and never read the environment or the filesystem
