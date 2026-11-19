@@ -634,7 +634,7 @@ url, timeout_secs)` and `websearch::run_search_with` / `Provider::search_with` /
 A `wasi` build has no SSRF guard, no DNS pinning and no TLS configuration. The
 host the component runs in must enforce those: deny private and loopback
 targets, pin or validate resolution, and terminate TLS. A host refusal reaches
-the library as `TransportError::Other("denied by host: ...")`.
+the library as `TransportError::Other("denied by host (<code>): ...")`.
 
 Configuration deliberately lives only in `src/`. The library crates take
 fully-populated option structs and never read the environment or the filesystem

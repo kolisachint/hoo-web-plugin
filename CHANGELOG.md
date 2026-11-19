@@ -13,6 +13,10 @@ lockstep semantic versioning across all crates.
 
 ### Fixed
 
+- **Refused requests name the code.** The `wasi:http` transport words a host
+  refusal as `denied by host (<code>): ...` (for example `HttpRequestDenied`),
+  so a host can tell which refusal it was.
+
 - **Plugin component lock refreshed.** `plugin/component/Cargo.lock` pinned
   `webtools-core`, `webtools-fetch` and `webtools-search` at 0.7.1 while the
   crates were 0.7.2, so `plugin/build.sh` (`--locked`) failed. The lock now

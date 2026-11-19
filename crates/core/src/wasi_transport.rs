@@ -4,7 +4,8 @@
 //! The host owns the network policy, so this transport does not check the
 //! target host (no SSRF guard), does not pin addresses and configures no TLS
 //! trust. The caller's host must enforce those itself. Its refusals surface as
-//! `TransportError::Other("denied by host: ...")`.
+//! `TransportError::Other("denied by host (<code>): ...")`, the code being the
+//! `wasi:http` error code name (`HttpRequestDenied`, say).
 //!
 //! Every call is synchronous and takes no `.await` while a WASI resource is
 //! alive. That keeps the futures `Send` even though WASI resources are not.
@@ -378,8 +379,12 @@ fn map_error_code(code: ErrorCode, target: &str) -> TransportError {
         ErrorCode::TlsProtocolError
         | ErrorCode::TlsCertificateError
         | ErrorCode::TlsAlertReceived(_) => TransportError::Tls(detail),
-        ErrorCode::DestinationIpProhibited => other("denied by host: destination IP prohibited"),
-        ErrorCode::HttpRequestDenied => other("denied by host: request denied"),
+        ErrorCode::DestinationIpProhibited => other(&format!(
+            "denied by host ({detail}): destination IP prohibited"
+        )),
+        ErrorCode::HttpRequestDenied => {
+            other(&format!("denied by host ({detail}): request denied"))
+        }
         _ => TransportError::Other(detail),
     }
 }
