@@ -11,15 +11,18 @@ the full URLs sit in a references list at the end.
 
 ## Tools
 
-hoocode exposes them as `ext_webtools_fetch` and `ext_webtools_search`.
+hoocode exposes them as `WebFetch` and `WebSearch`, the names the component declares,
+with no prefix. The plugin's origin is kept apart from the name, so permission rules
+can select a tool in two ways: by tool name (`WebFetch`, `WebSearch`) or by origin
+(`plugin:webtools`, every tool from this plugin).
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `fetch` | `url` (required); `output` (`text` \| `markdown` \| `structured`, default `text`); `max_tokens` (default 6000, at least 1); `offset`; `outline`; `grep`; `timeout` (seconds, default 10, capped at 8); `json` | Compact: `{url, final_url, title?, content, truncated, next_offset?}`. `json: true`: the whole `FetchResult`. |
-| `search` | `query` (required, not empty); `max_results` (default 5); `safe_search` (`on` \| `off`); `timeout` (seconds, default 12, capped at 12); `json` | Compact: `{query, provider, result_count, content}`. `json: true`: the whole `SearchOutput`. |
+| `WebFetch` | `url` (required); `output` (`text` \| `markdown` \| `structured`, default `text`); `max_tokens` (default 6000, at least 1); `offset`; `outline`; `grep`; `timeout` (seconds, default 10, capped at 8); `json` | Compact: `{url, final_url, title?, content, truncated, next_offset?}`. `json: true`: the whole `FetchResult`. |
+| `WebSearch` | `query` (required, not empty); `max_results` (default 5); `safe_search` (`on` \| `off`); `timeout` (seconds, default 12, capped at 12); `json` | Compact: `{query, provider, result_count, content}`. `json: true`: the whole `SearchOutput`. |
 
-Argument names and defaults match the webtools MCP server (`src/mcp.rs`), except
-the search timeout: 12 seconds here (capped at 12), 10 in the MCP server. Invalid
+Argument names and defaults match the webtools MCP server (`src/mcp.rs`), which keeps
+the lowercase names `fetch` and `search`, except the search timeout: 12 seconds here (capped at 12), 10 in the MCP server. Invalid
 arguments return `invalid-args`. A `max_tokens` of 0, a `grep` pattern that does not
 compile, an empty or blank `query`, and an unknown `output` or `safe_search` are
 refused before any request is made. An `offset` at or past the end of the page is

@@ -1,7 +1,8 @@
 //! webtools as a hoocode extension component (`hoocode:extension@0.1.0`).
 //!
-//! Two tools, `fetch` and `search`, with the same argument names, defaults and
-//! output as the webtools MCP server (`src/mcp.rs`). The libraries run over the
+//! Two tools, `WebFetch` and `WebSearch`, with the same argument names, defaults
+//! and output as the webtools MCP server (`src/mcp.rs`). The host uses the names
+//! as declared here, without a prefix. The libraries run over the
 //! `wasi:http` transport, so every request goes through hoocode's permission gate
 //! and SSRF block. Search keys come from the host's `config-get`.
 
@@ -81,7 +82,7 @@ impl exports::hoocode::extension::tool::Guest for Webtools {
     fn list_tools() -> Vec<ToolInfo> {
         vec![
             ToolInfo {
-                name: "fetch".to_owned(),
+                name: "WebFetch".to_owned(),
                 description: "Fetch a URL and return token-efficient, reference-style content. \
                     Links become inline [N] markers with full URLs in a references list. \
                     Handles HTML, JSON, and plain text."
@@ -89,7 +90,7 @@ impl exports::hoocode::extension::tool::Guest for Webtools {
                 input_schema_json: fetch_schema().to_string(),
             },
             ToolInfo {
-                name: "search".to_owned(),
+                name: "WebSearch".to_owned(),
                 description: "Search the web and return results with reference-style URLs. \
                     Uses DuckDuckGo by default (no API key); a keyed provider can be configured."
                     .to_owned(),
@@ -100,11 +101,11 @@ impl exports::hoocode::extension::tool::Guest for Webtools {
 
     fn call(name: String, args_json: String) -> Result<String, ToolError> {
         let result = match name.as_str() {
-            "fetch" => {
+            "WebFetch" => {
                 let args: FetchArgs = parse_args(&args_json)?;
                 run_fetch(args)?
             }
-            "search" => {
+            "WebSearch" => {
                 let args: SearchArgs = parse_args(&args_json)?;
                 run_search(args)?
             }
@@ -472,6 +473,53 @@ fn block_on<F: Future>(future: F) -> F::Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exports::hoocode::extension::tool::Guest;
+
+    /// The names the model sees: as declared, PascalCase, matching the regex the
+    /// host accepts. Written out by hand so a rename cannot pass unnoticed.
+    #[test]
+    fn list_tools_declares_web_fetch_and_web_search() {
+        let tools = <Webtools as Guest>::list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["WebFetch", "WebSearch"]);
+
+        for name in names {
+            let mut chars = name.chars();
+            assert!(
+                chars.next().is_some_and(|c| c.is_ascii_alphabetic()),
+                "{name}"
+            );
+            assert!(name.len() <= 64, "{name}");
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "{name}"
+            );
+        }
+    }
+
+    /// Dispatch uses the same names. The old names are unknown now. The calls
+    /// below fail on the empty arguments before any request is made.
+    #[test]
+    fn call_dispatches_by_declared_name_only() {
+        for old in ["fetch", "search"] {
+            assert!(
+                matches!(
+                    <Webtools as Guest>::call(old.to_owned(), "{}".to_owned()),
+                    Err(ToolError::UnknownTool(_))
+                ),
+                "{old}"
+            );
+        }
+        assert!(matches!(
+            <Webtools as Guest>::call("WebFetch".to_owned(), "{}".to_owned()),
+            Err(ToolError::InvalidArgs(_))
+        ));
+        assert!(matches!(
+            <Webtools as Guest>::call("WebSearch".to_owned(), "{}".to_owned()),
+            Err(ToolError::InvalidArgs(_))
+        ));
+    }
 
     fn fetch_args(json: &str) -> FetchArgs {
         serde_json::from_str(json).expect("fetch args")

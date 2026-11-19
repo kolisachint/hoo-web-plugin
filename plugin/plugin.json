@@ -5,5 +5,13 @@
   "description": "Web fetch and search for hoocode: token-efficient, reference-style page text and search results with citable URLs.",
   "license": "MIT",
   "repository": "https://github.com/kolisachint/hoo-web-plugin",
-  "keywords": ["web", "fetch", "search", "webtools"]
+  "keywords": ["web", "fetch", "search", "webtools"],
+  "extensions": {
+    "dev.hoocode": {
+      "tools": {
+        "WebFetch": { "render": "web-fetch" },
+        "WebSearch": { "render": "web-search" }
+      }
+    }
+  }
 }

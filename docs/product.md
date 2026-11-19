@@ -424,13 +424,16 @@ environment.
 `plugin/` is an Agent Plugins 1.0 package for [hoocode](https://github.com/kolisachint/hoocode).
 The same libraries run inside hoocode as a WASI 0.2 component
 (`plugin/dev.hoocode/extension.wasm`), with no `webtools` binary on the path. The
-tools are `ext_webtools_fetch` and `ext_webtools_search`, with the MCP argument
-names and defaults. The plugin caps each request (8 s for `fetch`, 12 s for
-`search`) and each call at 25 s, so a slow search provider is given time to answer
-and a fallback still gets a turn. Requests go through hoocode's permission gate and its SSRF
-block, and search keys come from hoocode's settings under `pluginConfig.webtools` (`searchProvider`,
-`braveApiKey`, `tavilyApiKey`, `searxngUrl`). The component's build, tools and
-settings are in [`plugin/README.md`](../plugin/README.md).
+tools are `WebFetch` and `WebSearch`, the names the component declares, with no
+prefix. The MCP argument names and defaults are kept. The plugin caps each request
+(8 s for `WebFetch`, 12 s for `WebSearch`) and each call at 25 s, so a slow search
+provider is given time to answer and a fallback still gets a turn. Requests go
+through hoocode's permission gate and its SSRF block, and search keys come from
+hoocode's settings under `pluginConfig.webtools` (`searchProvider`, `braveApiKey`,
+`tavilyApiKey`, `searxngUrl`). Permission rules can select these tools by name
+(`WebFetch`, `WebSearch`) or by origin (`plugin:webtools`, every tool from this
+plugin). The component's build, tools and settings are in
+[`plugin/README.md`](../plugin/README.md).
 
 ## Security (SSRF guard)
 

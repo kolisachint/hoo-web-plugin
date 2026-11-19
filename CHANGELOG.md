@@ -26,6 +26,11 @@ lockstep semantic versioning across all crates.
 
 ### Changed
 
+- **Plugin tool names.** The plugin's tools are `WebFetch` and `WebSearch`
+  (were `fetch` and `search`, which hoocode prefixed as `ext_webtools_*`). The host
+  now uses the declared name as is. The MCP server and CLI keep `fetch` and
+  `search`. `plugin/plugin.json` declares the `dev.hoocode` extension tools and
+  their render hints. The WIT doc comment on `tool-info.name` documents the rule.
 - **CI guards the component lock.** The `plugin` job runs `cargo metadata
   --locked` on `plugin/component` before the wasm build, so a stale lock fails
   at once.
